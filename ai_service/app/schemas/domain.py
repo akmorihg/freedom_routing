@@ -134,38 +134,7 @@ class TicketAssignment(BaseModel):
     assigned_manager: str | None = Field(
         default=None, description="Manager name who received the ticket",
     )
-    # ── Filter trace (explains *why* this manager) ───────────────────────
-    #    Stored so decisions are auditable / debuggable.
 
-    # Step 1 — Geo
-    nearest_office: str | None = Field(
-        default=None,
-        description="Office returned by geo filter (before competency check)",
-    )
-    geo_fallback: bool = Field(
-        default=False,
-        description="True when address unknown / foreign → Астана/Алматы split",
-    )
-
-    # Step 2 — Competency
-    required_skills: list[str] = Field(
-        default_factory=list,
-        description="Skills the manager must have for this ticket (e.g. ['VIP', 'KZ'])",
-    )
-    required_position: str | None = Field(
-        default=None,
-        description="Required position level (e.g. 'Главный специалист' for data-change requests)",
-    )
-    eligible_manager_count: int = Field(
-        default=0,
-        description="How many managers passed all filters in the target office",
-    )
-
-    # Step 3 — Load balancing
-    assigned_manager_load: int | None = Field(
-        default=None,
-        description="Manager's current_load at time of assignment",
-    )
     round_robin_index: int | None = Field(
         default=None,
         description="0-based index in the round-robin pair for this office",

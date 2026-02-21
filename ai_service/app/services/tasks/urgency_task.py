@@ -19,6 +19,7 @@ async def run(
     max_retries: int = 2,
     timeout: float = 5.0,
     base_delay: float = 0.3,
+    image_urls: list[str] | None = None,
 ) -> tuple[int, int, bool]:
     """Estimate urgency.
 
@@ -28,7 +29,7 @@ async def run(
     """
     try:
         score, retries = await retry_with_timeout(
-            lambda: _attempt(llm, description),
+            lambda: _attempt(llm, description, image_urls),
             task_name="urgency_score",
             max_retries=max_retries,
             timeout_seconds=timeout,
@@ -40,7 +41,7 @@ async def run(
         return FALLBACK_SCORE, max_retries, True
 
 
-async def _attempt(llm: LLMClient, description: str) -> int:
-    raw = await llm.estimate_urgency(description)
+async def _attempt(llm: LLMClient, description: str, image_urls: list[str] | None = None) -> int:
+    raw = await llm.estimate_urgency(description, image_urls=image_urls)
     logger.debug("urgency raw=%r", raw)
     return normalize_urgency(raw)

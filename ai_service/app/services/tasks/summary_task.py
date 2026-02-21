@@ -23,6 +23,7 @@ async def run(
     max_retries: int = 2,
     timeout: float = 5.0,
     base_delay: float = 0.3,
+    image_urls: list[str] | None = None,
 ) -> tuple[str, int, bool]:
     """Summarise the ticket text.
 
@@ -37,7 +38,7 @@ async def run(
     """
     try:
         text, retries = await retry_with_timeout(
-            lambda: _attempt(llm, description, context),
+            lambda: _attempt(llm, description, context, image_urls),
             task_name="summary",
             max_retries=max_retries,
             timeout_seconds=timeout,
@@ -53,7 +54,8 @@ async def _attempt(
     llm: LLMClient,
     description: str,
     context: dict[str, str] | None,
+    image_urls: list[str] | None = None,
 ) -> str:
-    raw = await llm.summarize_ticket(description, context=context)
+    raw = await llm.summarize_ticket(description, context=context, image_urls=image_urls)
     logger.debug("summary raw=%r", raw[:120])
     return normalize_summary(raw)

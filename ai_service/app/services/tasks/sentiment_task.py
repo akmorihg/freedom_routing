@@ -20,6 +20,7 @@ async def run(
     max_retries: int = 2,
     timeout: float = 5.0,
     base_delay: float = 0.3,
+    image_urls: list[str] | None = None,
 ) -> tuple[Sentiment, int, bool]:
     """Classify sentiment.
 
@@ -29,7 +30,7 @@ async def run(
     """
     try:
         raw, retries = await retry_with_timeout(
-            lambda: _attempt(llm, description),
+            lambda: _attempt(llm, description, image_urls),
             task_name="sentiment",
             max_retries=max_retries,
             timeout_seconds=timeout,
@@ -41,7 +42,7 @@ async def run(
         return FALLBACK, max_retries, True
 
 
-async def _attempt(llm: LLMClient, description: str) -> Sentiment:
-    raw = await llm.classify_sentiment(description)
+async def _attempt(llm: LLMClient, description: str, image_urls: list[str] | None = None) -> Sentiment:
+    raw = await llm.classify_sentiment(description, image_urls=image_urls)
     logger.debug("sentiment raw=%r", raw)
     return normalize_sentiment(raw)

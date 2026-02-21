@@ -41,6 +41,16 @@ class Settings:
         default_factory=lambda: int(os.getenv("LOG_TEXT_MAX_CHARS", "100"))
     )
 
+    # ── Google Maps (geo-normalization) ──────────────────────────────────
+    google_maps_api_key: str = field(
+        default_factory=lambda: os.getenv("GOOGLE_MAPS_API_KEY", "")
+    )
+
+    # ── Batch processing ─────────────────────────────────────────────────
+    batch_max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("BATCH_MAX_CONCURRENCY", "10"))
+    )
+
     # ── Service ──────────────────────────────────────────────────────────
     service_name: str = "ai-analysis-service"
     service_version: str = "0.1.0"

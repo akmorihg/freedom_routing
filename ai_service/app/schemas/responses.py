@@ -7,6 +7,18 @@ from pydantic import BaseModel, Field
 from app.schemas.enums import Language, RequestType, Sentiment
 
 
+class GeoCoordinates(BaseModel):
+    """Geocoded client location."""
+
+    latitude: float | None = None
+    longitude: float | None = None
+    formatted_address: str = ""
+    geo_status: str = Field(
+        default="skipped",
+        description="skipped | ok | fallback | error",
+    )
+
+
 class AnalysisResult(BaseModel):
     """Core analysis payload."""
 
@@ -15,6 +27,11 @@ class AnalysisResult(BaseModel):
     urgency_score: int = Field(..., ge=1, le=10)
     language: Language
     summary: str = Field(..., min_length=1)
+    geo: GeoCoordinates = Field(default_factory=GeoCoordinates)
+    image_enriched: bool = Field(
+        default=False,
+        description="True if attachments were used to enrich the analysis.",
+    )
 
 
 class TaskLatencies(BaseModel):
@@ -25,6 +42,8 @@ class TaskLatencies(BaseModel):
     urgency_score: float = 0.0
     language: float = 0.0
     summary: float = 0.0
+    geo: float = 0.0
+    image_describe: float = 0.0
 
 
 class RetriesUsed(BaseModel):
@@ -35,6 +54,8 @@ class RetriesUsed(BaseModel):
     urgency_score: int = 0
     language: int = 0
     summary: int = 0
+    geo: int = 0
+    image_describe: int = 0
 
 
 class AnalysisMeta(BaseModel):
@@ -53,3 +74,11 @@ class AnalyzeTicketResponse(BaseModel):
     ticket_id: str
     analysis: AnalysisResult
     meta: AnalysisMeta
+
+
+class AnalyzeBatchResponse(BaseModel):
+    """POST /ai/analyze-batch response body."""
+
+    results: list[AnalyzeTicketResponse]
+    total_tickets: int
+    total_processing_ms: float

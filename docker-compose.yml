@@ -39,12 +39,9 @@ services:
     container_name: ai-service
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8001:8001"
     env_file:
       - ./ai_service/.env
-    depends_on:
-      postgres:
-        condition: service_healthy
 
 volumes:
   pg_data:

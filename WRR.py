@@ -3,11 +3,10 @@ class SmartWRRRouter:
         self.managers = managers
         self.last_assigned_id = None
 
-        # Capacity coefficients (higher = can handle more load)
         self.capacity = {
             "Специалист": 1.0,
             "Ведущий специалист": 1.3,
-            "Глав специалист": 1.6
+            "Главный специалист": 1.6
         }
 
         # Segment priority weights
@@ -18,15 +17,16 @@ class SmartWRRRouter:
         }
 
     # Ticket priority calculation
-    def calculate_ticket_weight(self, urgency_score, client_segment, attachment):
+    def calculate_ticket_weight(self, urgency_score, client_segment):
         seg_weight = self.segment_weight.get(client_segment, 0)
-        return urgency_score + seg_weight + attachment
+        return urgency_score + seg_weight
 
     # Filter managers
     def filter_managers(self, ticket):
 
         language = ticket["language"]
         segment = ticket["client_segment"]
+        ticket_type = ticket.get("type")
 
         pool = []
 
@@ -37,12 +37,11 @@ class SmartWRRRouter:
                 continue
 
             # VIP / Priority handling
-            if segment in ["VIP", "Priority"]:
-                if "VIP" not in m["skills"]:
-                    continue
-            else:
-                # Mass → everyone allowed
-                pass
+            if segment in ["VIP", "Priority"] and "VIP" not in m["skills"]:
+                continue
+
+            if ticket_type == "Смена данных" and m["position"] != "Глав специалист":
+                continue
 
             pool.append(m)
 
@@ -57,7 +56,6 @@ class SmartWRRRouter:
 
         urgency_score = ticket["urgency_score"]
         client_segment = ticket["client_segment"]
-        attachment = ticket["attachment"]
 
         # filter managers
         pool = self.filter_managers(ticket)
@@ -77,7 +75,7 @@ class SmartWRRRouter:
                 selected = top_candidates[0]
 
         # calculate ticket weight
-        ticket_weight = self.calculate_ticket_weight(urgency_score, client_segment, attachment)
+        ticket_weight = self.calculate_ticket_weight(urgency_score, client_segment)
 
         # update manager load
         selected["current_load"] += ticket_weight

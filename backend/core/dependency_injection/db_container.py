@@ -23,12 +23,7 @@ class DBContainer:
 
         self.internal_db_engine: AsyncEngine = create_async_engine(
             self.settings.DATABASE_URL,
-            echo=False,
-            poolclass=NullPool,
-            connect_args={
-                "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
-                "statement_cache_size": 0
-            },
+            echo=False
         )
 
         self.internal_db_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

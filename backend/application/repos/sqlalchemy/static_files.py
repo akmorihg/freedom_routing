@@ -86,7 +86,7 @@ class MiniIORepository(AbstractStaticFileRepository):
                 ExpiresIn=expires_in,
             )
             url = await maybe_url if inspect.isawaitable(maybe_url) else maybe_url
-            
+
             return str(url)
 
     async def get(

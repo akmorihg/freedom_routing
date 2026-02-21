@@ -1,5 +1,5 @@
 import logging
-from typing import TypeVar, Type, Any, List, Tuple, Optional, Dict, Union
+from typing import TypeVar, Type, Any, List, Tuple, Optional, Dict, Union, get_origin, get_args
 
 from sqlalchemy import select, func, delete, and_, or_, asc, desc
 from sqlalchemy.engine import Result
@@ -48,6 +48,16 @@ class BaseSQLAlchemyRepo(IDBRepository[ModelT, EntityT, MapperT]):
             primary_key_name: getattr(self.model, primary_key_name)
             for primary_key_name in primary_key_names
         }
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        for base in getattr(cls, "__orig_bases__", ()):
+            if get_origin(base) is BaseSQLAlchemyRepo:
+                classes = get_args(base)
+                cls.model = classes[0]
+                cls.entity = classes[1]
+                cls.mapper = classes[2]
 
     def _primary_key_to_prefix(self, pk: Union[Any, Dict[str, Any]]) -> str:
         if isinstance(pk, dict) and pk:

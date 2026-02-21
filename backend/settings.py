@@ -12,5 +12,11 @@ class Settings(BaseSettings):
 
     REDIS_URL: str
 
+    S3_URL: str
+    S3_ACCESS_KEY: str
+    S3_SECRET_KEY: str
+    S3_REGION_NAME: str
+    S3_BUCKET: str
+
 
 settings = Settings()

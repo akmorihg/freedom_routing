@@ -1,33 +1,41 @@
 import os
 import re
 import math
-import base64
+import logging
+from collections import defaultdict, deque
 from datetime import date, datetime, time
 from decimal import Decimal
 from html import escape
-from pathlib import Path
 from typing import Any, Tuple
 from uuid import UUID, uuid4
 
+from backend.core.dependency_injection import app_container
+from backend.core.dependency_injection.repository_container import RepositoryContainer
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from typing_extensions import TypedDict
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required to run NL2SQL agent.")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 NL2SQL_MAX_ROWS = int(os.getenv("NL2SQL_MAX_ROWS", "100"))
 NL2SQL_ANALYTICS_MAX_ROWS = int(os.getenv("NL2SQL_ANALYTICS_MAX_ROWS", "500"))
 NL2SQL_MAX_CHART_POINTS = int(os.getenv("NL2SQL_MAX_CHART_POINTS", "30"))
-NL2SQL_CHARTS_DIR = os.getenv("NL2SQL_CHARTS_DIR", "generated_charts")
+NL2SQL_CHART_BUCKET = os.getenv("NL2SQL_CHART_BUCKET")
+NL2SQL_CHART_KEY_PREFIX = os.getenv("NL2SQL_CHART_KEY_PREFIX", "nl2sql/charts")
+NL2SQL_CHART_URL_EXPIRES_IN = int(os.getenv("NL2SQL_CHART_URL_EXPIRES_IN", "86400"))
 
 engine: AsyncEngine = create_async_engine(
     DATABASE_URL,
@@ -44,12 +52,98 @@ FORBIDDEN_SQL_RE = re.compile(
 LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 
 
+class GraphState(TypedDict, total=False):
+    messages: list[Any]
+
+
 def _strip_sql_fences(sql: str) -> str:
     value = sql.strip()
     if value.startswith("```"):
         value = re.sub(r"^```[a-zA-Z0-9_]*\n?", "", value)
         value = re.sub(r"\n?```$", "", value)
     return value.strip()
+
+
+def _extract_tool_call_ids(message: Any) -> list[str]:
+    tool_calls: list[Any] = []
+
+    if isinstance(message, AIMessage):
+        tool_calls = getattr(message, "tool_calls", []) or []
+    elif isinstance(message, dict):
+        direct_tool_calls = message.get("tool_calls")
+        if isinstance(direct_tool_calls, list):
+            tool_calls = direct_tool_calls
+        else:
+            additional_kwargs = message.get("additional_kwargs")
+            if isinstance(additional_kwargs, dict):
+                kw_tool_calls = additional_kwargs.get("tool_calls")
+                if isinstance(kw_tool_calls, list):
+                    tool_calls = kw_tool_calls
+
+    ids: list[str] = []
+    for tool_call in tool_calls:
+        if isinstance(tool_call, dict):
+            tool_call_id = tool_call.get("id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                ids.append(tool_call_id)
+    return ids
+
+
+def _is_ai_message(message: Any) -> bool:
+    if isinstance(message, AIMessage):
+        return True
+    if isinstance(message, dict):
+        role = message.get("role")
+        msg_type = message.get("type")
+        return role == "assistant" or msg_type == "ai"
+    return False
+
+
+def _is_tool_message(message: Any) -> bool:
+    if isinstance(message, ToolMessage):
+        return True
+    if isinstance(message, dict):
+        role = message.get("role")
+        msg_type = message.get("type")
+        return role == "tool" or msg_type == "tool"
+    return False
+
+
+def _get_tool_message_id(message: Any) -> str | None:
+    if isinstance(message, ToolMessage):
+        tool_call_id = getattr(message, "tool_call_id", None)
+        return tool_call_id if isinstance(tool_call_id, str) and tool_call_id else None
+    if isinstance(message, dict):
+        tool_call_id = message.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return tool_call_id
+    return None
+
+
+def _sanitize_tool_message_sequence(messages: list[Any]) -> tuple[list[Any], int]:
+    sanitized_messages: list[Any] = []
+    pending_tool_call_ids: set[str] = set()
+    dropped_tool_messages = 0
+
+    for message in messages:
+        if _is_ai_message(message):
+            sanitized_messages.append(message)
+            pending_tool_call_ids = set(_extract_tool_call_ids(message))
+            continue
+
+        if _is_tool_message(message):
+            tool_call_id = _get_tool_message_id(message)
+            if tool_call_id and tool_call_id in pending_tool_call_ids:
+                sanitized_messages.append(message)
+                pending_tool_call_ids.discard(tool_call_id)
+            else:
+                dropped_tool_messages += 1
+            continue
+
+        sanitized_messages.append(message)
+        pending_tool_call_ids = set()
+
+    return sanitized_messages, dropped_tool_messages
 
 
 def _enforce_read_only(sql: str, max_rows: int | None = None) -> Tuple[bool, str]:
@@ -96,6 +190,11 @@ def _parse_table_name(table_name: str) -> Tuple[str, str]:
     return schema_name.strip('"'), table.strip('"')
 
 
+def _normalize_qualified_table_name(table_name: str) -> str:
+    schema_name, table = _parse_table_name(table_name)
+    return f"{schema_name}.{table}"
+
+
 def _to_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -104,11 +203,6 @@ def _to_float(value: Any) -> float | None:
         if math.isfinite(number):
             return number
     return None
-
-
-def _sanitize_file_stem(value: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip().lower())
-    return cleaned.strip("_") or "chart"
 
 
 def _build_chart_svg(
@@ -235,6 +329,357 @@ async def _execute_query(query: str, max_rows: int) -> dict[str, Any]:
         "columns": column_names,
         "row_count": len(data),
         "rows": data,
+    }
+
+
+async def _get_schema_catalog() -> dict[str, Any]:
+    tables_stmt = text(
+        """
+        SELECT table_schema, table_name
+        FROM information_schema.tables
+        WHERE table_type = 'BASE TABLE'
+          AND table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY table_schema, table_name
+        """
+    )
+
+    columns_stmt = text(
+        """
+        SELECT
+            c.table_schema,
+            c.table_name,
+            c.column_name,
+            c.data_type,
+            c.is_nullable,
+            c.column_default,
+            c.ordinal_position
+        FROM information_schema.columns c
+        JOIN information_schema.tables t
+          ON t.table_schema = c.table_schema
+         AND t.table_name = c.table_name
+        WHERE t.table_type = 'BASE TABLE'
+          AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY c.table_schema, c.table_name, c.ordinal_position
+        """
+    )
+
+    pk_stmt = text(
+        """
+        SELECT
+            tc.table_schema,
+            tc.table_name,
+            kcu.column_name,
+            kcu.ordinal_position
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY tc.table_schema, tc.table_name, kcu.ordinal_position
+        """
+    )
+
+    fk_stmt = text(
+        """
+        SELECT
+            tc.table_schema AS from_schema,
+            tc.table_name AS from_table,
+            kcu.column_name AS from_column,
+            ccu.table_schema AS to_schema,
+            ccu.table_name AS to_table,
+            ccu.column_name AS to_column
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+         AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND ccu.table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY from_schema, from_table, from_column
+        """
+    )
+
+    try:
+        async with engine.connect() as conn:
+            table_rows = (await conn.execute(tables_stmt)).mappings().all()
+            column_rows = (await conn.execute(columns_stmt)).mappings().all()
+            pk_rows = (await conn.execute(pk_stmt)).mappings().all()
+            fk_rows = (await conn.execute(fk_stmt)).mappings().all()
+    except SQLAlchemyError as exc:
+        return {"error": f"Failed to load schema catalog: {exc}"}
+
+    table_map: dict[str, dict[str, Any]] = {}
+    for row in table_rows:
+        qualified_table = f"{row['table_schema']}.{row['table_name']}"
+        table_map[qualified_table] = {
+            "table": qualified_table,
+            "columns": [],
+            "primary_key": [],
+            "foreign_keys": [],
+        }
+
+    for row in column_rows:
+        qualified_table = f"{row['table_schema']}.{row['table_name']}"
+        table_map.setdefault(
+            qualified_table,
+            {"table": qualified_table, "columns": [], "primary_key": [], "foreign_keys": []},
+        )
+        table_map[qualified_table]["columns"].append(
+            {
+                "name": row["column_name"],
+                "data_type": row["data_type"],
+                "is_nullable": row["is_nullable"],
+                "default": row["column_default"],
+            }
+        )
+
+    for row in pk_rows:
+        qualified_table = f"{row['table_schema']}.{row['table_name']}"
+        if qualified_table in table_map:
+            table_map[qualified_table]["primary_key"].append(row["column_name"])
+
+    relationships: list[dict[str, Any]] = []
+    for row in fk_rows:
+        from_table = f"{row['from_schema']}.{row['from_table']}"
+        to_table = f"{row['to_schema']}.{row['to_table']}"
+        relationship = {
+            "from_table": from_table,
+            "from_column": row["from_column"],
+            "to_table": to_table,
+            "to_column": row["to_column"],
+            "join_condition": f"{from_table}.{row['from_column']} = {to_table}.{row['to_column']}",
+        }
+        relationships.append(relationship)
+
+        if from_table in table_map:
+            table_map[from_table]["foreign_keys"].append(
+                {
+                    "column": row["from_column"],
+                    "references_table": to_table,
+                    "references_column": row["to_column"],
+                }
+            )
+
+    tables = sorted(table_map.values(), key=lambda item: item["table"])
+    relationships = sorted(
+        relationships,
+        key=lambda rel: (rel["from_table"], rel["to_table"], rel["from_column"], rel["to_column"]),
+    )
+    table_names = [table["table"] for table in tables]
+
+    return {
+        "table_count": len(tables),
+        "relationship_count": len(relationships),
+        "table_names": table_names,
+        "tables": tables,
+        "relationships": relationships,
+    }
+
+
+def _resolve_requested_tables(
+    requested_tables: list[str],
+    available_tables: list[str],
+) -> tuple[list[str], list[str]]:
+    by_lower = {table.lower(): table for table in available_tables}
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for table in available_tables:
+        by_name[table.split(".", 1)[1].lower()].append(table)
+
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for raw_table in requested_tables:
+        candidate = raw_table.strip().strip('"')
+        if not candidate:
+            continue
+
+        normalized = _normalize_qualified_table_name(candidate)
+        resolved_table = by_lower.get(normalized.lower())
+        if resolved_table is None and "." not in candidate:
+            public_variant = f"public.{candidate}"
+            resolved_table = by_lower.get(public_variant.lower())
+        if resolved_table is None and "." not in candidate:
+            matches = by_name.get(candidate.lower(), [])
+            if len(matches) == 1:
+                resolved_table = matches[0]
+
+        if resolved_table is None:
+            unresolved.append(candidate)
+        elif resolved_table not in resolved:
+            resolved.append(resolved_table)
+
+    return resolved, unresolved
+
+
+def _find_join_path(
+    source_table: str,
+    target_table: str,
+    adjacency: dict[str, list[dict[str, str]]],
+) -> list[dict[str, str]] | None:
+    if source_table == target_table:
+        return []
+
+    queue = deque([source_table])
+    visited = {source_table}
+    parent: dict[str, tuple[str, dict[str, str]]] = {}
+
+    while queue:
+        current = queue.popleft()
+        for edge in adjacency.get(current, []):
+            next_table = edge["to_table"]
+            if next_table in visited:
+                continue
+
+            visited.add(next_table)
+            parent[next_table] = (current, edge)
+            if next_table == target_table:
+                queue.clear()
+                break
+            queue.append(next_table)
+
+    if target_table not in visited:
+        return None
+
+    path: list[dict[str, str]] = []
+    cursor = target_table
+    while cursor != source_table:
+        previous_table, edge = parent[cursor]
+        path.append(edge)
+        cursor = previous_table
+    path.reverse()
+    return path
+
+
+def _sanitize_file_stem(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip().lower())
+    return cleaned.strip("_") or "chart"
+
+
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def _upload_chart_image_via_repo(
+    repository_container: RepositoryContainer,
+    bucket: str,
+    object_key: str,
+    data: bytes,
+    content_type: str,
+    url_expires_in: int,
+) -> dict[str, Any]:
+    repo = repository_container.static_file_repo_
+    return await repo.create(
+        bucket=bucket,
+        key=object_key,
+        data=data,
+        content_type=content_type,
+        include_url=True,
+        url_expires_in=url_expires_in,
+    )
+
+
+@tool
+async def get_schema_relationships() -> dict[str, Any]:
+    """
+    Return full DB schema context: all tables, columns, PKs, FKs, and relationship graph.
+    Use this before writing SQL.
+    """
+    return await _get_schema_catalog()
+
+
+@tool
+async def suggest_joins(tables: str) -> dict[str, Any]:
+    """
+    Suggest JOIN paths from foreign-key relationships.
+    Input format: comma-separated table names, e.g. "tickets, ticket_analysis, addresses".
+    """
+    requested_tables = [part.strip() for part in tables.split(",") if part.strip()]
+    if len(requested_tables) < 2:
+        return {"error": "Provide at least two tables in comma-separated format."}
+
+    schema_catalog = await _get_schema_catalog()
+    if "error" in schema_catalog:
+        return schema_catalog
+
+    available_tables: list[str] = schema_catalog["table_names"]
+    resolved_tables, unresolved_tables = _resolve_requested_tables(
+        requested_tables=requested_tables,
+        available_tables=available_tables,
+    )
+    if len(resolved_tables) < 2:
+        return {
+            "error": "Could not resolve enough valid tables for join suggestion.",
+            "requested_tables": requested_tables,
+            "resolved_tables": resolved_tables,
+            "unresolved_tables": unresolved_tables,
+        }
+
+    relationships: list[dict[str, Any]] = schema_catalog["relationships"]
+    adjacency: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for relationship in relationships:
+        from_edge = {
+            "from_table": relationship["from_table"],
+            "to_table": relationship["to_table"],
+            "from_column": relationship["from_column"],
+            "to_column": relationship["to_column"],
+        }
+        adjacency[from_edge["from_table"]].append(from_edge)
+
+        reverse_edge = {
+            "from_table": relationship["to_table"],
+            "to_table": relationship["from_table"],
+            "from_column": relationship["to_column"],
+            "to_column": relationship["from_column"],
+        }
+        adjacency[reverse_edge["from_table"]].append(reverse_edge)
+
+    anchor_table = resolved_tables[0]
+    join_paths: list[dict[str, Any]] = []
+    disconnected_tables: list[str] = []
+
+    for target_table in resolved_tables[1:]:
+        path = _find_join_path(
+            source_table=anchor_table,
+            target_table=target_table,
+            adjacency=adjacency,
+        )
+        if path is None:
+            disconnected_tables.append(target_table)
+            continue
+
+        steps = []
+        sql_lines = [f"FROM {path[0]['from_table']}"]
+        for edge in path:
+            on_clause = (
+                f"{edge['from_table']}.{edge['from_column']} = "
+                f"{edge['to_table']}.{edge['to_column']}"
+            )
+            steps.append(
+                {
+                    "from_table": edge["from_table"],
+                    "to_table": edge["to_table"],
+                    "on": on_clause,
+                }
+            )
+            sql_lines.append(f"JOIN {edge['to_table']} ON {on_clause}")
+
+        join_paths.append(
+            {
+                "from": anchor_table,
+                "to": target_table,
+                "steps": steps,
+                "suggested_join_sql": "\n".join(sql_lines),
+            }
+        )
+
+    return {
+        "requested_tables": requested_tables,
+        "resolved_tables": resolved_tables,
+        "unresolved_tables": unresolved_tables,
+        "disconnected_tables": disconnected_tables,
+        "join_paths": join_paths,
     }
 
 
@@ -410,7 +855,7 @@ async def generate_chart_image(
     max_points: int = 20,
 ) -> dict[str, Any]:
     """
-    Generate a chart image (SVG + data URI) from a read-only SQL query result.
+    Generate a chart image (SVG), upload it to MinIO, and return a chat-safe URL.
     Supported chart_type: bar, line, scatter.
     """
     normalized_type = chart_type.strip().lower()
@@ -456,14 +901,40 @@ async def generate_chart_image(
         y_label=y_column,
     )
 
-    chart_dir = Path(__file__).resolve().parent / NL2SQL_CHARTS_DIR
-    chart_dir.mkdir(parents=True, exist_ok=True)
     file_stem = _sanitize_file_stem(safe_title)
-    file_name = f"{file_stem}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}.svg"
-    chart_path = chart_dir / file_name
-    chart_path.write_text(svg, encoding="utf-8")
+    object_key = (
+        f"{NL2SQL_CHART_KEY_PREFIX.rstrip('/')}/"
+        f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
+        f"{file_stem}_{uuid4().hex[:12]}.svg"
+    )
 
-    data_uri = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
+    settings = app_container.global_vars_map.get("settings")
+    default_bucket = getattr(settings, "S3_BUCKET", "static") if settings is not None else "static"
+    bucket = NL2SQL_CHART_BUCKET or default_bucket
+
+    try:
+        upload_result = await _upload_chart_image_via_repo(
+            bucket=bucket,
+            object_key=object_key,
+            data=svg.encode("utf-8"),
+            content_type="image/svg+xml",
+            url_expires_in=NL2SQL_CHART_URL_EXPIRES_IN,
+        )
+    except Exception as exc:
+        logger.exception("Failed to upload chart image to MinIO")
+        return {
+            "query": result["query"],
+            "chart_type": normalized_type,
+            "error": f"Chart generated but upload failed: {exc}",
+        }
+
+    image_url = upload_result.get("url")
+    if not image_url:
+        return {
+            "query": result["query"],
+            "chart_type": normalized_type,
+            "error": "Chart uploaded but no URL was returned by storage repository.",
+        }
 
     return {
         "query": result["query"],
@@ -473,29 +944,36 @@ async def generate_chart_image(
         "points_used": len(points),
         "dropped_rows_non_numeric_y": dropped_rows,
         "image_mime_type": "image/svg+xml",
-        "image_path": str(chart_path),
-        "image_data_uri": data_uri,
-        "image_markdown": f"![{safe_title}]({data_uri})",
+        "bucket": bucket,
+        "object_key": object_key,
+        "image_url": image_url,
+        "image_markdown": f"![{safe_title}]({image_url})",
     }
 
 
 SYSTEM_PROMPT = (
     "You are an NL2SQL assistant for the Freedom Routing backend. "
     "Use tools to inspect schema and run read-only SQL. "
-    "Workflow for data questions: list_tables -> describe_table (for relevant tables) -> run_sql_query -> answer. "
+    "Before generating SQL, always call get_schema_relationships to load all schemas and relationships. "
+    "For multi-table queries, call suggest_joins with relevant tables and use those join conditions. "
+    "Workflow for data questions: get_schema_relationships -> suggest_joins (if multi-table) -> run_sql_query -> answer. "
     "Workflow for analytics requests: analytics_summary -> explanation. "
-    "Workflow for chart/image requests: analytics_summary (optional) -> generate_chart_image -> return image_markdown and short explanation. "
+    "Workflow for chart/image requests: get_schema_relationships -> analytics_summary (optional) -> generate_chart_image -> return image_markdown and short explanation. "
     "Never invent columns/tables. "
-    "Use explicit joins and explicit column names. "
+    "Prefer explicit INNER/LEFT JOIN syntax over subqueries when data spans multiple models. "
+    "Never use implicit comma joins. "
+    "Use explicit column names with table qualifiers. "
     "If no rows are returned, state that clearly. "
     "Do not attempt INSERT/UPDATE/DELETE/DDL."
 )
 
 llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
 
-graph = create_agent(
+nl2sql_agent_graph = create_agent(
     model=llm,
     tools=[
+        get_schema_relationships,
+        suggest_joins,
         list_tables,
         describe_table,
         run_sql_query,
@@ -504,3 +982,31 @@ graph = create_agent(
     ],
     system_prompt=SYSTEM_PROMPT,
 )
+
+
+def sanitize_messages_node(state: GraphState) -> dict[str, Any]:
+    raw_messages = state.get("messages", [])
+    if not isinstance(raw_messages, list):
+        return {}
+
+    sanitized_messages, dropped_count = _sanitize_tool_message_sequence(raw_messages)
+    if dropped_count > 0:
+        logger.warning(
+            "Dropped %s orphan tool message(s) before model call to avoid OpenAI role validation error.",
+            dropped_count,
+        )
+    return {"messages": sanitized_messages}
+
+
+async def run_agent_node(state: GraphState) -> dict[str, Any]:
+    return await nl2sql_agent_graph.ainvoke(state)
+
+
+builder = StateGraph(GraphState)
+builder.add_node("sanitize_messages", sanitize_messages_node)
+builder.add_node("agent", run_agent_node)
+builder.set_entry_point("sanitize_messages")
+builder.add_edge("sanitize_messages", "agent")
+builder.add_edge("agent", END)
+
+graph = builder.compile()

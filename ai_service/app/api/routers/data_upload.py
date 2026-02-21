@@ -39,9 +39,69 @@ _SEGMENT_PRIORITY: dict[str, int] = {
     "priority": 1,
 }
 
-# Default country/region for Kazakhstan offices
+# Default country for Kazakhstan offices
 _DEFAULT_COUNTRY = "Казахстан"
-_DEFAULT_REGION = "Казахстан"
+
+# City → canonical region mapping for Kazakhstan.
+# Used when the CSV row has no explicit Область column (managers, BUs).
+_CITY_REGION_MAP: dict[str, str] = {
+    "актау": "Мангистауская область",
+    "актобе": "Актюбинская область",
+    "алматы": "г. Алматы",
+    "астана": "г. Астана",
+    "атырау": "Атырауская область",
+    "караганда": "Карагандинская область",
+    "кокшетау": "Акмолинская область",
+    "костанай": "Костанайская область",
+    "кызылорда": "Кызылординская область",
+    "павлодар": "Павлодарская область",
+    "петропавловск": "Северо-Казахстанская область",
+    "тараз": "Жамбылская область",
+    "уральск": "Западно-Казахстанская область",
+    "усть-каменогорск": "Восточно-Казахстанская область",
+    "шымкент": "г. Шымкент",
+    # smaller towns from tickets.csv
+    "тургень": "Алматинская область",
+    "красный яр": "Восточно-Казахстанская область",
+    "шортанды": "Акмолинская область",
+    "осакаровка": "Карагандинская область",
+    "косшы": "Акмолинская область",
+    "ленгер": "Туркестанская область",
+    "кентау": "Туркестанская область",
+    "аксу": "Павлодарская область",
+    "кыргауылды": "Алматинская область",
+    "сарань": "Карагандинская область",
+    "кокпекты": "Абайская область",
+    "индербор": "Атырауская область",
+    "бадам": "Туркестанская область",
+    "бескарагай": "Восточно-Казахстанская область",
+    "шардара": "Туркестанская область",
+    "конаев": "Алматинская область",
+    "капчагай": "Алматинская область",
+    "кокпек": "Алматинская область",
+    "туркестан": "Туркестанская область",
+    "aktau": "Мангистауская область",
+}
+
+
+def _infer_region(city_name: str, csv_region: str = "") -> str:
+    """Return the best region name: explicit CSV value → city lookup → country fallback."""
+    if csv_region and csv_region.strip():
+        return csv_region.strip()
+    key = city_name.strip().lower()
+    # handle composite like "Конаев (Капчагай)"
+    if "(" in key:
+        inner = key.split("(")[1].rstrip(")")
+        if inner in _CITY_REGION_MAP:
+            return _CITY_REGION_MAP[inner]
+    if key in _CITY_REGION_MAP:
+        return _CITY_REGION_MAP[key]
+    # Try prefix match for names like "Косшы / Астана"
+    for part in key.split("/"):
+        part = part.strip()
+        if part in _CITY_REGION_MAP:
+            return _CITY_REGION_MAP[part]
+    return _DEFAULT_COUNTRY   # fallback
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -68,11 +128,24 @@ async def _read_csv_file(file: UploadFile) -> bytes:
     return content
 
 
-async def _ensure_default_geo(bc: BackendClient) -> tuple[int, int]:
-    """Ensure default country + region exist, return (country_id, region_id)."""
+async def _ensure_country(bc: BackendClient) -> int:
+    """Ensure default country exists, return country_id."""
     country = await bc.find_or_create_country(_DEFAULT_COUNTRY)
-    region = await bc.find_or_create_region(_DEFAULT_REGION, country["id_"])
-    return country["id_"], region["id_"]
+    return country["id_"]
+
+
+async def _resolve_region_id(
+    bc: BackendClient,
+    country_id: int,
+    region_name: str,
+    region_cache: dict[str, int],
+) -> int:
+    """Get or create a region by name, with caching."""
+    key = region_name.strip().lower()
+    if key not in region_cache:
+        region = await bc.find_or_create_region(region_name.strip(), country_id)
+        region_cache[key] = region["id_"]
+    return region_cache[key]
 
 
 _DOB_ISO = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
@@ -115,12 +188,13 @@ async def upload_managers(
 
     bc = _get_backend()
     try:
-        country_id, region_id = await _ensure_default_geo(bc)
+        country_id = await _ensure_country(bc)
 
         # Caches: name → DB id
         position_cache: dict[str, int] = {}
         skill_cache: dict[str, int] = {}
         city_cache: dict[str, int] = {}
+        region_cache: dict[str, int] = {}
 
         created_managers = 0
         db_errors: list[str] = []
@@ -145,8 +219,12 @@ async def upload_managers(
                     if sk_lower:
                         skill_ids.append(skill_cache[sk_lower])
 
-                # City
+                # Region (inferred from city for managers CSV)  
                 city_name = (mgr.office or "Алматы").strip()
+                region_name = _infer_region(city_name)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
+
+                # City
                 if city_name not in city_cache:
                     city = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = city["id_"]
@@ -205,15 +283,19 @@ async def upload_business_units(
 
     bc = _get_backend()
     try:
-        country_id, region_id = await _ensure_default_geo(bc)
+        country_id = await _ensure_country(bc)
 
         city_cache: dict[str, int] = {}
+        region_cache: dict[str, int] = {}
         created_offices = 0
         db_errors: list[str] = []
 
         for unit in result.units:
             try:
                 city_name = (unit.office or "Алматы").strip()
+                region_name = _infer_region(city_name)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
+
                 if city_name not in city_cache:
                     city = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = city["id_"]
@@ -267,11 +349,12 @@ async def upload_tickets(
 
     bc = _get_backend()
     try:
-        country_id, region_id = await _ensure_default_geo(bc)
+        country_id = await _ensure_country(bc)
 
         gender_cache: dict[str, int] = {}
         segment_cache: dict[str, int] = {}
         city_cache: dict[str, int] = {}
+        region_cache: dict[str, int] = {}
 
         created_tickets = 0
         db_errors: list[str] = []
@@ -293,9 +376,14 @@ async def upload_tickets(
                     segment_cache[seg_name] = s["id_"]
                 segment_id = segment_cache[seg_name]
 
-                # City
+                # Region (from CSV Область column, or inferred from city)
                 addr = ticket.address
                 city_name = (addr.city if addr and addr.city else "Алматы").strip()
+                csv_region = addr.region if addr else ""
+                region_name = _infer_region(city_name, csv_region)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
+
+                # City
                 if city_name not in city_cache:
                     c = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = c["id_"]
@@ -386,10 +474,11 @@ async def upload_all(
 
     bc = _get_backend()
     try:
-        country_id, region_id = await _ensure_default_geo(bc)
+        country_id = await _ensure_country(bc)
 
         # Shared caches
         city_cache: dict[str, int] = {}
+        region_cache: dict[str, int] = {}
         position_cache: dict[str, int] = {}
         skill_cache: dict[str, int] = {}
         gender_cache: dict[str, int] = {}
@@ -401,6 +490,8 @@ async def upload_all(
         for unit in bu_result.units:
             try:
                 city_name = (unit.office or "Алматы").strip()
+                region_name = _infer_region(city_name)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
                 if city_name not in city_cache:
                     c = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = c["id_"]
@@ -430,6 +521,8 @@ async def upload_all(
                         skill_ids.append(skill_cache[sk_lower])
 
                 city_name = (mgr.office or "Алматы").strip()
+                region_name = _infer_region(city_name)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
                 if city_name not in city_cache:
                     c = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = c["id_"]
@@ -462,6 +555,9 @@ async def upload_all(
 
                 addr = ticket.address
                 city_name = (addr.city if addr and addr.city else "Алматы").strip()
+                csv_region = addr.region if addr else ""
+                region_name = _infer_region(city_name, csv_region)
+                region_id = await _resolve_region_id(bc, country_id, region_name, region_cache)
                 if city_name not in city_cache:
                     c = await bc.find_or_create_city(city_name, region_id)
                     city_cache[city_name] = c["id_"]

@@ -73,3 +73,16 @@ class TicketAttachmentEntity(BaseEntity):
             "ticket_id": self.ticket_id,
             "attachment_id": self.attachment_id,
         }
+
+
+@dataclass
+class TicketAssignmentEntity(BaseEntity):
+    ticket_id: UUID
+    manager_id: int
+
+    @property
+    def primary_key(self) -> Union[Any, Dict[str, Any]]:
+        return {
+            "ticket_id": self.ticket_id,
+            "manager_id": self.manager_id,
+        }

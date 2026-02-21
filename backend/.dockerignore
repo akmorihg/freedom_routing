@@ -1,0 +1,51 @@
+# VCS
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Builds / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Env files (don't bake secrets into image)
+.env
+.env.*
+!.env.example
+
+# Node (if any)
+node_modules/
+
+# Local data
+*.sqlite3
+
+# Docker artifacts
+docker-compose*.yml
+Dockerfile*

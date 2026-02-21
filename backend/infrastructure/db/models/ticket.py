@@ -10,7 +10,7 @@ class Ticket(Base):
     gender_id = Column(Integer, ForeignKey("genders.id"), nullable=False)
     date_of_birth = Column(Date, nullable=False)
     description = Column(String, nullable=False, default="")
-    segment_id = Column(Integer, ForeignKey("segments.id"), nullable=False)
+    segment_id = Column(Integer, ForeignKey("client_segments.id"), nullable=False)
     address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False)
 
 
@@ -18,4 +18,4 @@ class TickerAttachments(Base):
     __tablename__ = "ticket_attachments"
 
     ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), primary_key=True)
-    attachment_id = Column(UUID(as_uuid=True), ForeignKey("attachments.id"), primary_key=True)
+    attachment_id = Column(Integer, ForeignKey("attachments.id"), primary_key=True)

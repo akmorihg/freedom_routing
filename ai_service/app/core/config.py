@@ -54,6 +54,11 @@ class Settings:
         default_factory=lambda: int(os.getenv("BATCH_MAX_CONCURRENCY", "10"))
     )
 
+    # ── Backend API (DB service) ─────────────────────────────────────────
+    backend_url: str = field(
+        default_factory=lambda: os.getenv("BACKEND_URL", "http://backend:8000")
+    )
+
     # ── Service ──────────────────────────────────────────────────────────
     service_name: str = "ai-analysis-service"
     service_version: str = "0.1.0"

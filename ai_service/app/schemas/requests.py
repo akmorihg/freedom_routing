@@ -49,6 +49,14 @@ class AnalyzeTicketRequest(BaseModel):
         default=Segment.MASS,
         description="Client segment (Mass / VIP / Priority). Used for future prompt tuning.",
     )
+    gender: str = Field(
+        default="",
+        description="Client gender from CSV (e.g. 'Мужской', 'Женский').",
+    )
+    date_of_birth: str = Field(
+        default="",
+        description="Client date of birth (ISO-ish string from CSV, e.g. '1998-10-02 0:00').",
+    )
     attachments: list[str] = Field(
         default_factory=list,
         description=(

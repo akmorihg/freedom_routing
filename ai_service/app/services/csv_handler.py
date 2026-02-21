@@ -36,6 +36,14 @@ _COLUMN_MAP: dict[str, str] = {
     "ticket_id": "ticket_id",
     "id": "ticket_id",
     # --
+    "пол клиента": "gender",
+    "пол": "gender",
+    "gender": "gender",
+    # --
+    "дата рождения": "date_of_birth",
+    "date_of_birth": "date_of_birth",
+    "dob": "date_of_birth",
+    # --
     "описание": "description",
     "описание ": "description",  # trailing space in real CSV
     "description": "description",
@@ -202,6 +210,10 @@ def parse_csv(content: bytes | str, *, encoding: str = "utf-8-sig") -> CSVParseR
         # segment
         segment = _parse_segment(fields.get("segment", ""))
 
+        # gender & date of birth
+        gender = fields.get("gender", "")
+        date_of_birth = fields.get("date_of_birth", "")
+
         # address (only build if at least one geo field is present)
         address: AddressInfo | None = None
         geo_fields = {
@@ -219,6 +231,8 @@ def parse_csv(content: bytes | str, *, encoding: str = "utf-8-sig") -> CSVParseR
                 ticket_id=ticket_id,
                 description=description,
                 segment=segment,
+                gender=gender,
+                date_of_birth=date_of_birth,
                 attachments=attachments,
                 address=address,
             )

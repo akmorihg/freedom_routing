@@ -1,4 +1,4 @@
-"""Router: POST /ai/analyze-ticket, POST /ai/analyze-batch, POST /ai/upload-csv."""
+"""Router: POST /ai/analyze-ticket, POST /ai/analyze-batch, POST /ai/upload-csv, POST /ai/analyze-from-db."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from app.core.logging import get_logger
 from app.schemas.requests import AnalyzeBatchRequest, AnalyzeTicketRequest
 from app.schemas.responses import AnalyzeBatchResponse, AnalyzeTicketResponse
 from app.services.analysis_orchestrator import AnalysisOrchestrator
+from app.services.backend_client import BackendClient
 from app.services.csv_handler import parse_csv
 from app.services.result_store import save_result
 
@@ -307,6 +308,153 @@ async def upload_csv(
         total_tickets=len(csv_result.tickets),
         total_processing_ms=round(total_ms, 1),
     )
+
+
+# ── DB-backed analyze ────────────────────────────────────────────────────
+
+
+@router.post(
+    "/analyze-from-db",
+    status_code=status.HTTP_200_OK,
+    summary="Pull tickets from DB, run AI analysis, store results",
+    description=(
+        "Fetches all tickets from the database (via backend API), runs LLM "
+        "analysis on each one, and stores the resulting TicketAnalysis back "
+        "into the database. Skips tickets that already have an analysis. "
+        "Returns a summary of the run."
+    ),
+)
+async def analyze_from_db(
+    concurrency: int = Query(default=5, ge=1, le=20, description="Max parallel analyses"),
+    limit: int = Query(default=0, ge=0, description="Max tickets to process (0 = all)"),
+) -> JSONResponse:
+    """Pull tickets from DB → run LLM → store analysis results to DB."""
+    settings = get_settings()
+
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENAI_API_KEY is not configured.",
+        )
+
+    bc = BackendClient(base_url=settings.backend_url)
+    try:
+        # 1. Fetch all tickets from DB
+        all_tickets = await bc.get_tickets()
+        logger.info("Fetched %d tickets from DB", len(all_tickets))
+
+        # 2. Fetch existing analyses to skip already-analyzed tickets
+        existing_analyses = await bc.get_ticket_analyses()
+        analyzed_ids: set[str] = {
+            a.get("ticket_id", "") for a in existing_analyses
+        }
+        logger.info("Found %d existing analyses, will skip those", len(analyzed_ids))
+
+        # 3. Filter to un-analyzed tickets
+        pending = [t for t in all_tickets if t.get("id_", t.get("id", "")) not in analyzed_ids]
+        if limit > 0:
+            pending = pending[:limit]
+
+        if not pending:
+            return JSONResponse(
+                content={
+                    "message": "No new tickets to analyze.",
+                    "total_in_db": len(all_tickets),
+                    "already_analyzed": len(analyzed_ids),
+                    "processed": 0,
+                },
+                media_type="application/json; charset=utf-8",
+            )
+
+        logger.info("Will analyze %d tickets (skipped %d already analyzed)", len(pending), len(analyzed_ids))
+
+        # 4. Run LLM analysis
+        concurrency = min(concurrency, settings.batch_max_concurrency)
+        orchestrator = AnalysisOrchestrator(settings)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _analyze_one(ticket_data: dict) -> tuple[str, AnalyzeTicketResponse | None, str | None]:
+            """Returns (ticket_id, response_or_None, error_or_None)."""
+            tid = ticket_data.get("id_", ticket_data.get("id", "unknown"))
+            description = ticket_data.get("description", "")
+
+            # Resolve address for geocoding
+            address_query = ""
+            addr_id = ticket_data.get("address_id")
+            if addr_id:
+                address_query = await bc.resolve_address_query(addr_id)
+
+            async with semaphore:
+                try:
+                    resp = await orchestrator.analyze(
+                        ticket_id=tid,
+                        description=description,
+                        segment="Mass",
+                        attachments=None,
+                        address_query=address_query,
+                    )
+                    return tid, resp, None
+                except Exception as e:
+                    logger.error("Analysis failed for ticket %s: %s", tid, e)
+                    return tid, None, str(e)
+
+        t_start = time.perf_counter()
+        tasks = [_analyze_one(t) for t in pending]
+        results = await asyncio.gather(*tasks)
+        total_ms = (time.perf_counter() - t_start) * 1000
+
+        # 5. Store successful analyses to DB
+        stored = 0
+        failed = 0
+        errors: list[str] = []
+
+        for tid, resp, err in results:
+            if err or resp is None:
+                failed += 1
+                if err:
+                    errors.append(f"{tid}: {err}")
+                continue
+            try:
+                a = resp.analysis
+                await bc.create_ticket_analysis(
+                    ticket_id=resp.ticket_id,
+                    request_type=a.request_type.value,
+                    sentiment=a.sentiment.value,
+                    urgency_score=a.urgency_score,
+                    language=a.language.value,
+                    summary=a.summary,
+                    image_enriched=a.image_enriched,
+                    latitude=a.geo.latitude,
+                    longitude=a.geo.longitude,
+                    formatted_address=a.geo.formatted_address,
+                )
+                stored += 1
+                # Also save to local JSON
+                await save_result(resp.model_dump())
+            except Exception as e:
+                failed += 1
+                errors.append(f"{tid} (store): {e}")
+                logger.warning("Failed to store analysis for %s: %s", tid, e)
+
+        logger.info(
+            "DB analyze run: %d stored, %d failed in %.1fms",
+            stored, failed, total_ms,
+        )
+
+        return JSONResponse(
+            content={
+                "total_in_db": len(all_tickets),
+                "already_analyzed": len(analyzed_ids),
+                "processed": len(pending),
+                "stored": stored,
+                "failed": failed,
+                "errors": errors[:50],  # cap error list
+                "total_processing_ms": round(total_ms, 1),
+            },
+            media_type="application/json; charset=utf-8",
+        )
+    finally:
+        await bc.close()
 
 
 @router.get(

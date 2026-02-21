@@ -192,6 +192,20 @@ class BackendClient:
             "city_id": city_id, "address": address,
         })
 
+    async def get_offices(self) -> list[dict]:
+        """Return all offices."""
+        items = await self._get("/location/offices")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    async def get_cities(self) -> list[dict]:
+        """Return all cities."""
+        items = await self._get("/location/cities")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
     # ══════════════════════════════════════════════════════════════════
     # MANAGERS
     # ══════════════════════════════════════════════════════════════════
@@ -221,6 +235,54 @@ class BackendClient:
 
     async def get_managers(self) -> list[dict]:
         items = await self._get("/managers/")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    async def get_managers_expanded(self) -> list[dict]:
+        """Fetch all managers with position, city, and skills expanded.
+
+        Uses individual per-manager requests to avoid backend
+        connection-pool exhaustion on the bulk list endpoint.
+        """
+        # 1. Plain manager list (no expansion – very fast)
+        plain = await self.get_managers()
+
+        # 2. Bulk-fetch positions and build lookup
+        positions = await self.get_positions()
+        pos_map: dict[int, dict] = {p["id_"]: p for p in positions}
+
+        # 3. Bulk-fetch skills and build lookup
+        skills_list = await self.get_skills()
+        skill_map: dict[int, dict] = {s["id_"]: s for s in skills_list}
+
+        # 4. Get each manager individually to resolve skills
+        #    (default expand_skills=True on single-get)
+        enriched: list[dict] = []
+        for m in plain:
+            mid = m["id_"]
+            try:
+                detail = await self._get(f"/managers/{mid}")
+                mgr_skills = detail.get("skills") or []
+            except Exception:
+                mgr_skills = []
+
+            m["position"] = pos_map.get(m.get("position_id"))
+            m["skills"] = mgr_skills
+            enriched.append(m)
+
+        return enriched
+
+    async def get_positions(self) -> list[dict]:
+        """Return all manager positions."""
+        items = await self._get("/managers/positions")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    async def get_skills(self) -> list[dict]:
+        """Return all skills."""
+        items = await self._get("/managers/skills")
         if isinstance(items, dict) and "items" in items:
             items = items["items"]
         return items
@@ -309,6 +371,33 @@ class BackendClient:
             if e.response.status_code == 404:
                 return None
             raise
+
+    # ══════════════════════════════════════════════════════════════════
+    # SEGMENTS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def get_segments(self) -> list[dict]:
+        """Return all client segments."""
+        items = await self._get("/tickets/segments")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    # ══════════════════════════════════════════════════════════════════
+    # TICKET ASSIGNMENTS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def create_ticket_assignment(self, ticket_id: str, manager_id: int) -> dict:
+        return await self._post("/tickets/assignments", {
+            "ticket_id": ticket_id,
+            "manager_id": manager_id,
+        })
+
+    async def get_ticket_assignments(self) -> list[dict]:
+        items = await self._get("/tickets/assignments")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
 
     # ══════════════════════════════════════════════════════════════════
     # HEALTH

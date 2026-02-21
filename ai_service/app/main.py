@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers.analysis import router as analysis_router
 from app.api.routers.data_upload import router as data_upload_router
+from app.api.routers.routing import router as routing_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
 
     app.include_router(analysis_router)
     app.include_router(data_upload_router)
+    app.include_router(routing_router)
 
     @app.get("/health", tags=["Health"])
     async def health() -> dict[str, str]:

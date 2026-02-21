@@ -108,19 +108,20 @@ class TicketAnalysisResult(BaseModel):
 class TicketAssignment(BaseModel):
     """Routing decision for a single ticket — filled by RoutingService.
 
-    Suggested DB table name: ``ticket_assignment`` with FK to ``ticket_analysis``.
+    Stored in ``ticket_assignments`` (backend DB) with composite PK
+    (ticket_id, manager_id).
     """
 
-    # ── Identity ─────────────────────────────────────────────────────────
     ticket_id: str = Field(..., description="FK → ticket_analysis.ticket_id")
-
-    # ── Assignment result ────────────────────────────────────────────────
-    assigned_manager: str | None = Field(
-        default=None, description="Manager name who received the ticket",
+    assigned_manager: int | None = Field(
+        default=None, description="Manager DB id who received the ticket",
     )
-
     round_robin_index: int | None = Field(
         default=None,
-        description="0-based index in the round-robin pair for this office",
+        description="Manager's cumulative assignment count at time of routing",
+    )
+    heuristic_score: float | None = Field(
+        default=None,
+        description="Combined geo+load score (lower = better match)",
     )
 

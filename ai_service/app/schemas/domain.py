@@ -108,23 +108,7 @@ class TicketAnalysisResult(BaseModel):
 class TicketAssignment(BaseModel):
     """Routing decision for a single ticket — filled by RoutingService.
 
-    Separate table from ``ticket_analysis`` with a 1-to-1 FK on
-    ``ticket_id``.  Captures *which* manager was assigned, *why*,
-    and the cascade of filters that led to the decision.
-
-    Suggested DB table name: ``ticket_assignment``
-
-    Routing cascade (§3.2 Business Rules)
-    ──────────────────────────────────────
-    1. **Geo filter** — find nearest office to client coordinates.
-       Exception: unknown address / foreign → 50/50 Астана / Алматы.
-    2. **Competency filter (hard skills)**
-       • VIP / Priority segment → manager must have ``VIP`` skill.
-       • Request type ``Смена данных`` → manager must be ``Главный специалист``.
-       • Language KZ / ENG → manager must have matching skill tag.
-    3. **Load balancing (Round Robin)**
-       Within the target office, pick the 2 eligible managers with the
-       lowest ``current_load`` and assign tickets round-robin.
+    Suggested DB table name: ``ticket_assignment`` with FK to ``ticket_analysis``.
     """
 
     # ── Identity ─────────────────────────────────────────────────────────

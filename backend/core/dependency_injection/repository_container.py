@@ -13,6 +13,7 @@ from backend.application.repos.abstract.ticket.attachment_type import AbstractAt
 from backend.application.repos.abstract.ticket.client_segment import AbstractClientSegmentRepository
 from backend.application.repos.abstract.ticket.gender import AbstractGenderRepository
 from backend.application.repos.abstract.ticket.ticket import AbstractTicketRepository
+from backend.application.repos.abstract.ticket.ticket_analysis import AbstractTicketAnalysisRepository
 from backend.application.repos.abstract.ticket.ticket_attachment import AbstractTicketAttachmentRepository
 from backend.application.repos.sqlalchemy.location.address import SqlAlchemyAddressRepository
 from backend.application.repos.sqlalchemy.location.city import SqlAlchemyCityRepository
@@ -29,6 +30,7 @@ from backend.application.repos.sqlalchemy.ticket.attachment_type import SqlAlche
 from backend.application.repos.sqlalchemy.ticket.client_segment import SqlAlchemyClientSegmentRepository
 from backend.application.repos.sqlalchemy.ticket.gender import SqlAlchemyGenderRepository
 from backend.application.repos.sqlalchemy.ticket.ticket import SqlAlchemyTicketRepository
+from backend.application.repos.sqlalchemy.ticket.ticket_analysis import SqlAlchemyTicketAnalysisRepository
 from backend.application.repos.sqlalchemy.ticket.ticket_attachment import SqlAlchemyTicketAttachmentRepository
 from backend.core.dependency_injection.db_container import DBContainer
 from typing import Dict, Any, List
@@ -156,6 +158,15 @@ class RepositoryContainer:
     @property
     def ticket_attachment_repo_(self) -> AbstractTicketAttachmentRepository:
         return SqlAlchemyTicketAttachmentRepository(
+            session=self._internal_session(),
+            is_transactional=self.is_transactional,
+            use_cache=True,
+            cache_manager=self.global_vars_map["cache_manager"],
+        )
+
+    @property
+    def ticket_analysis_repo_(self) -> AbstractTicketAnalysisRepository:
+        return SqlAlchemyTicketAnalysisRepository(
             session=self._internal_session(),
             is_transactional=self.is_transactional,
             use_cache=True,

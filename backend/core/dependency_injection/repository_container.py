@@ -52,11 +52,13 @@ class RepositoryContainer:
         self.global_vars_map = global_vars_map
         self.closeable_instances = closeable_instances
         self.is_transactional = is_transactional
+        self._cached_internal_session = None
 
     def _internal_session(self):
-        internal_session = self.db_container.internal_session()
-        self.closeable_instances.append(internal_session)
-        return internal_session
+        if self._cached_internal_session is None:
+            self._cached_internal_session = self.db_container.internal_session()
+            self.closeable_instances.append(self._cached_internal_session)
+        return self._cached_internal_session
 
     @property
     def attachment_type_repo_(self) -> AbstractAttachmentTypeRepository:

@@ -41,6 +41,10 @@ engine: AsyncEngine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
+    pool_timeout=30,
 )
 
 LEADING_ALLOWED_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)

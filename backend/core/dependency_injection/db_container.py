@@ -23,7 +23,12 @@ class DBContainer:
 
         self.internal_db_engine: AsyncEngine = create_async_engine(
             self.settings.DATABASE_URL,
-            echo=False
+            echo=False,
+            pool_size=20,
+            max_overflow=30,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_timeout=30,
         )
 
         self.internal_db_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

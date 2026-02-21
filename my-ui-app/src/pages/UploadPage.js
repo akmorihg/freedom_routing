@@ -9,17 +9,13 @@ import {
   Typography,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import { BACKEND_API_URL } from "../api/backendCrud";
-import { syncParsedCsvToBackend } from "../api/csvSync";
 
-const DEFAULT_AI_HOST = "http://192.168.0.151:8001";
+const DEFAULT_AI_HOST = "/ai";
 
 const getAiApiCandidates = () => {
   const candidates = [
     process.env.REACT_APP_AI_API_URL,
-    typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8001` : null,
     DEFAULT_AI_HOST,
-    "http://192.168.0.151:8001"
   ];
 
   return [...new Set(candidates.filter(Boolean))];
@@ -235,26 +231,11 @@ const UploadPage = ({ onDone }) => {
         ...prev,
         [key]: {
           ...prev[key],
-          progress: 100,
-          syncing: true,
-        },
-      }));
-
-      const backendSync = await syncParsedCsvToBackend(key, result);
-      const enrichedResult = {
-        ...result,
-        backend_sync: backendSync,
-      };
-
-      setFiles((prev) => ({
-        ...prev,
-        [key]: {
-          ...prev[key],
           status: "success",
           progress: 100,
           uploaded: true,
           syncing: false,
-          result: enrichedResult,
+          result: result,
           error: "",
         },
       }));
@@ -280,7 +261,6 @@ const UploadPage = ({ onDone }) => {
     const fileObj = files[key];
     const parsedCount = fileObj.result?.parsed;
     const skippedRows = fileObj.result?.skipped_rows;
-    const backendSync = fileObj.result?.backend_sync;
 
     return (
       <Box sx={{ marginBottom: 3 }}>
@@ -346,12 +326,6 @@ const UploadPage = ({ onDone }) => {
                 Skipped: {skippedRows}
               </Typography>
             )}
-            {backendSync && (
-              <Typography variant="body2" sx={{ color: "#0f172a", width: "100%" }}>
-                Backend sync: created {backendSync.created}, skipped {backendSync.skipped}, failed{" "}
-                {backendSync.failed}
-              </Typography>
-            )}
           </Box>
         )}
 
@@ -404,10 +378,6 @@ const UploadPage = ({ onDone }) => {
 
           <Typography variant="body2" color="text.secondary" sx={{ marginBottom: 3 }}>
             AI upload service: {apiBaseUrl}
-          </Typography>
-
-          <Typography variant="body2" color="text.secondary" sx={{ marginBottom: 3 }}>
-            Backend CRUD service: {BACKEND_API_URL}
           </Typography>
 
           {apiHealth.checking && (

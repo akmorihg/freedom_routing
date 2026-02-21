@@ -136,6 +136,20 @@ services:
       backend:
         condition: service_healthy
 
+  frontend:
+    build:
+      context: ./my-ui-app
+      dockerfile: Dockerfile
+    container_name: frontend
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
 volumes:
   pg_data:
   redis_data:

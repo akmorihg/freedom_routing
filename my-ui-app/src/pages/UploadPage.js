@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Alert,
   Box,
@@ -9,8 +9,21 @@ import {
   Typography,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import { BACKEND_API_URL } from "../api/backendCrud";
+import { syncParsedCsvToBackend } from "../api/csvSync";
 
-const AI_API_URL = process.env.REACT_APP_AI_API_URL || "http://localhost:8001";
+const DEFAULT_AI_HOST = "http://192.168.0.151:8001";
+
+const getAiApiCandidates = () => {
+  const candidates = [
+    process.env.REACT_APP_AI_API_URL,
+    typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8001` : null,
+    DEFAULT_AI_HOST,
+    "http://192.168.0.151:8001"
+  ];
+
+  return [...new Set(candidates.filter(Boolean))];
+};
 
 const FILE_CONFIG = {
   tickets: {
@@ -32,6 +45,7 @@ const createInitialFileState = () => ({
   progress: 0,
   uploaded: false,
   status: "idle", // idle | uploading | success | error
+  syncing: false,
   error: "",
   result: null,
 });
@@ -53,13 +67,14 @@ const normalizeErrorMessage = (data, fallback) => {
   return fallback;
 };
 
-const uploadCsvWithProgress = ({ file, endpoint, onProgress }) =>
+const uploadCsvWithProgress = ({ baseUrl, file, endpoint, onProgress }) =>
   new Promise((resolve, reject) => {
     const formData = new FormData();
     formData.append("file", file);
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${AI_API_URL}${endpoint}`);
+    xhr.open("POST", `${baseUrl}${endpoint}`);
+    xhr.timeout = 30000;
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
@@ -83,17 +98,94 @@ const uploadCsvWithProgress = ({ file, endpoint, onProgress }) =>
       reject(new Error(normalizeErrorMessage(data, `Upload failed with status ${xhr.status}`)));
     };
 
-    xhr.onerror = () => reject(new Error("Network error while uploading file."));
+    xhr.onerror = () =>
+      reject(
+        new Error(
+          `Network error: cannot reach ${baseUrl}${endpoint}. Check AI service availability and CORS.`,
+        ),
+      );
+    xhr.ontimeout = () =>
+      reject(
+        new Error(
+          `Request timed out while uploading to ${baseUrl}${endpoint}. Check API host, port 8001, and firewall.`,
+        ),
+      );
     xhr.send(formData);
   });
 
 const UploadPage = ({ onDone }) => {
   const [files, setFiles] = useState(initialFiles);
+  const [apiBaseUrl, setApiBaseUrl] = useState(process.env.REACT_APP_AI_API_URL || DEFAULT_AI_HOST);
+  const [apiHealth, setApiHealth] = useState({
+    checking: true,
+    ok: false,
+    message: "",
+  });
+
+  useEffect(() => {
+    const checkHealth = async () => {
+      const candidates = getAiApiCandidates();
+      for (const candidate of candidates) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        try {
+          const response = await fetch(`${candidate}/health`, {
+            method: "GET",
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            continue;
+          }
+
+          setApiBaseUrl(candidate);
+          setApiHealth({
+            checking: false,
+            ok: true,
+            message: "",
+          });
+          return;
+        } catch (_error) {
+          clearTimeout(timeoutId);
+        }
+      }
+
+      setApiHealth({
+        checking: false,
+        ok: false,
+        message: `Cannot reach AI API. Tried: ${candidates.join(", ")}`,
+      });
+    };
+
+    checkHealth();
+
+    return () => {
+      // no-op cleanup: each attempt has its own abort controller
+    };
+  }, []);
 
   const handleFileChange = async (e, key) => {
     const selectedFile = e.target.files[0];
     e.target.value = "";
     if (!selectedFile) return;
+
+    if (!apiHealth.ok) {
+      setFiles((prev) => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
+          file: selectedFile,
+          status: "error",
+          uploaded: false,
+          progress: 0,
+          error: apiHealth.message || "AI API is unavailable.",
+          result: null,
+        },
+      }));
+      return;
+    }
+
     if (!selectedFile.name.toLowerCase().endsWith(".csv")) {
       setFiles((prev) => ({
         ...prev,
@@ -117,6 +209,7 @@ const UploadPage = ({ onDone }) => {
         progress: 0,
         uploaded: false,
         status: "uploading",
+        syncing: false,
         error: "",
         result: null,
       },
@@ -124,6 +217,7 @@ const UploadPage = ({ onDone }) => {
 
     try {
       const result = await uploadCsvWithProgress({
+        baseUrl: apiBaseUrl,
         file: selectedFile,
         endpoint: FILE_CONFIG[key].endpoint,
         onProgress: (progress) => {
@@ -141,10 +235,26 @@ const UploadPage = ({ onDone }) => {
         ...prev,
         [key]: {
           ...prev[key],
+          progress: 100,
+          syncing: true,
+        },
+      }));
+
+      const backendSync = await syncParsedCsvToBackend(key, result);
+      const enrichedResult = {
+        ...result,
+        backend_sync: backendSync,
+      };
+
+      setFiles((prev) => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
           status: "success",
           progress: 100,
           uploaded: true,
-          result,
+          syncing: false,
+          result: enrichedResult,
           error: "",
         },
       }));
@@ -156,6 +266,7 @@ const UploadPage = ({ onDone }) => {
           status: "error",
           uploaded: false,
           progress: 0,
+          syncing: false,
           error: error.message || "Failed to upload file.",
         },
       }));
@@ -169,6 +280,7 @@ const UploadPage = ({ onDone }) => {
     const fileObj = files[key];
     const parsedCount = fileObj.result?.parsed;
     const skippedRows = fileObj.result?.skipped_rows;
+    const backendSync = fileObj.result?.backend_sync;
 
     return (
       <Box sx={{ marginBottom: 3 }}>
@@ -211,7 +323,9 @@ const UploadPage = ({ onDone }) => {
               }}
             />
             <Typography variant="body2" sx={{ marginTop: 1 }}>
-              Uploading... {fileObj.progress}%
+              {fileObj.syncing
+                ? "Persisting parsed rows to backend..."
+                : `Uploading... ${fileObj.progress}%`}
             </Typography>
           </Box>
         )}
@@ -230,6 +344,12 @@ const UploadPage = ({ onDone }) => {
             {typeof skippedRows === "number" && (
               <Typography variant="body2" sx={{ color: "#555" }}>
                 Skipped: {skippedRows}
+              </Typography>
+            )}
+            {backendSync && (
+              <Typography variant="body2" sx={{ color: "#0f172a", width: "100%" }}>
+                Backend sync: created {backendSync.created}, skipped {backendSync.skipped}, failed{" "}
+                {backendSync.failed}
               </Typography>
             )}
           </Box>
@@ -283,8 +403,24 @@ const UploadPage = ({ onDone }) => {
           </Typography>
 
           <Typography variant="body2" color="text.secondary" sx={{ marginBottom: 3 }}>
-            AI upload service: {AI_API_URL}
+            AI upload service: {apiBaseUrl}
           </Typography>
+
+          <Typography variant="body2" color="text.secondary" sx={{ marginBottom: 3 }}>
+            Backend CRUD service: {BACKEND_API_URL}
+          </Typography>
+
+          {apiHealth.checking && (
+            <Alert severity="info" sx={{ marginBottom: 2 }}>
+              Checking AI API connectivity...
+            </Alert>
+          )}
+
+          {!apiHealth.checking && !apiHealth.ok && (
+            <Alert severity="warning" sx={{ marginBottom: 2 }}>
+              {apiHealth.message} Upload will fail until the service is reachable.
+            </Alert>
+          )}
 
           {renderFileUpload("tickets")}
           {renderFileUpload("managers")}
@@ -306,6 +442,17 @@ const UploadPage = ({ onDone }) => {
           >
             {allUploaded ? "Continue" : "Upload all files to continue"}
           </Button>
+
+          {!apiHealth.checking && !apiHealth.ok && (
+            <Button
+              variant="text"
+              fullWidth
+              onClick={() => onDone?.({ skippedUpload: true })}
+              sx={{ marginTop: 1, textTransform: "none" }}
+            >
+              Continue to dashboard without uploads
+            </Button>
+          )}
         </CardContent>
       </Card>
     </Box>

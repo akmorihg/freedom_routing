@@ -1,7 +1,5 @@
-from uuid import uuid4
-
-from sqlalchemy import NullPool
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from backend.settings import Settings
 
@@ -23,7 +21,10 @@ class DBContainer:
 
         self.internal_db_engine: AsyncEngine = create_async_engine(
             self.settings.DATABASE_URL,
-            echo=False
+            echo=False,
+            poolclass=AsyncAdaptedQueuePool,
+            pool_size=100,
+            max_overflow=200,
         )
 
         self.internal_db_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

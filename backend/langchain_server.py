@@ -1,8 +1,11 @@
+import asyncio
+import json
 import os
 import re
 import math
 import logging
 from collections import defaultdict, deque
+from copy import deepcopy
 from datetime import date, datetime, time
 from decimal import Decimal
 from html import escape
@@ -17,6 +20,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -33,6 +37,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 NL2SQL_MAX_ROWS = int(os.getenv("NL2SQL_MAX_ROWS", "100"))
 NL2SQL_ANALYTICS_MAX_ROWS = int(os.getenv("NL2SQL_ANALYTICS_MAX_ROWS", "500"))
 NL2SQL_MAX_CHART_POINTS = int(os.getenv("NL2SQL_MAX_CHART_POINTS", "30"))
+NL2SQL_CANDIDATE_TOP_K = int(os.getenv("NL2SQL_CANDIDATE_TOP_K", "4"))
+NL2SQL_CANDIDATE_MAX_K = int(os.getenv("NL2SQL_CANDIDATE_MAX_K", "8"))
+NL2SQL_CANDIDATE_RESULT_PREVIEW_ROWS = int(
+    os.getenv("NL2SQL_CANDIDATE_RESULT_PREVIEW_ROWS", "25")
+)
 NL2SQL_CHART_BUCKET = os.getenv("NL2SQL_CHART_BUCKET")
 NL2SQL_CHART_KEY_PREFIX = os.getenv("NL2SQL_CHART_KEY_PREFIX", "nl2sql/charts")
 NL2SQL_CHART_URL_EXPIRES_IN = int(os.getenv("NL2SQL_CHART_URL_EXPIRES_IN", "86400"))
@@ -54,6 +63,489 @@ LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 
 class GraphState(TypedDict, total=False):
     messages: list[Any]
+
+
+class SQLCandidate(BaseModel):
+    sql: str = Field(description="Read-only PostgreSQL query using only the provided schema")
+    rationale: str = Field(description="Why this candidate can answer the user question")
+
+
+class SQLCandidateSet(BaseModel):
+    candidates: list[SQLCandidate] = Field(default_factory=list)
+
+
+class SQLCandidateSelection(BaseModel):
+    best_candidate_index: int = Field(
+        description="Zero-based index of the strongest candidate from the provided list",
+        ge=0,
+    )
+    reason: str = Field(default="")
+
+
+class StringTranslationVariants(BaseModel):
+    variants: list[str] = Field(default_factory=list)
+
+
+HARD_CODED_TABLES: list[dict[str, Any]] = [
+    {
+        "table": "public.addresses",
+        "description": "Normalized street address used by tickets and location entities.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "Address ID."},
+            {"name": "country_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to country dimension."},
+            {"name": "region_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to region dimension."},
+            {"name": "city_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to city dimension."},
+            {"name": "street", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Street name."},
+            {"name": "home_number", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Building number."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "country_id", "references_table": "public.countries", "references_column": "id"},
+            {"column": "region_id", "references_table": "public.regions", "references_column": "id"},
+            {"column": "city_id", "references_table": "public.cities", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.attachment_types",
+        "description": "Dictionary of attachment file/media types.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Attachment type ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Human-readable type name."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.attachments",
+        "description": "Stored files attached to tickets.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Attachment ID."},
+            {"name": "type", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to attachment type."},
+            {"name": "key", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Object storage key/path."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "type", "references_table": "public.attachment_types", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.cities",
+        "description": "City dictionary dimension.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "City ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "City name."},
+            {"name": "region_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to region dimension."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "region_id", "references_table": "public.regions", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.client_segments",
+        "description": "Client segmentation metadata for routing priority.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Segment ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Segment name."},
+            {"name": "priority", "data_type": "integer", "is_nullable": "NO", "default": "0", "description": "Relative routing/service priority."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.countries",
+        "description": "Country dictionary dimension.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Country ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Country name."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.genders",
+        "description": "Gender dictionary for ticket submitter demographics.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "Gender ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "YES", "default": None, "description": "Gender label."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.manager_positions",
+        "description": "Hierarchy positions used by managers.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Manager position ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "YES", "default": None, "description": "Position name."},
+            {"name": "hierarchy_level", "data_type": "integer", "is_nullable": "NO", "default": "0", "description": "Lower/upper hierarchy order value."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.manager_skills",
+        "description": "M2M table linking managers to skills.",
+        "columns": [
+            {"name": "manager_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to manager."},
+            {"name": "skill_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to skill."},
+        ],
+        "primary_key": ["manager_id", "skill_id"],
+        "foreign_keys": [
+            {"column": "manager_id", "references_table": "public.managers", "references_column": "id"},
+            {"column": "skill_id", "references_table": "public.skills", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.managers",
+        "description": "Routing managers/operators who can be assigned to tickets.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Manager ID."},
+            {"name": "position_id", "data_type": "integer", "is_nullable": "YES", "default": None, "description": "FK to manager position."},
+            {"name": "city_id", "data_type": "integer", "is_nullable": "YES", "default": None, "description": "FK to city of responsibility."},
+            {"name": "in_progress_requests", "data_type": "integer", "is_nullable": "NO", "default": "0", "description": "Current active workload count."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "position_id", "references_table": "public.manager_positions", "references_column": "id"},
+            {"column": "city_id", "references_table": "public.cities", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.offices",
+        "description": "Physical office locations.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Office ID."},
+            {"name": "city_id", "data_type": "integer", "is_nullable": "YES", "default": None, "description": "FK to city where office is located."},
+            {"name": "address", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Office street address text."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "city_id", "references_table": "public.cities", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.regions",
+        "description": "Region/state dimension.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Region ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Region name."},
+            {"name": "country_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to country dimension."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "country_id", "references_table": "public.countries", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.skills",
+        "description": "Skill dictionary for manager capabilities.",
+        "columns": [
+            {"name": "id", "data_type": "integer", "is_nullable": "NO", "default": "autoincrement", "description": "Skill ID."},
+            {"name": "name", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Skill name."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [],
+    },
+    {
+        "table": "public.ticket_analysis",
+        "description": "AI-enriched analysis output per ticket.",
+        "columns": [
+            {"name": "ticket_id", "data_type": "uuid", "is_nullable": "NO", "default": None, "description": "Ticket FK and PK."},
+            {"name": "request_type", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Predicted request category/type."},
+            {"name": "sentiment", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Sentiment label."},
+            {"name": "urgency_score", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "Urgency score from analysis."},
+            {"name": "language", "data_type": "string", "is_nullable": "NO", "default": None, "description": "Detected language code/name."},
+            {"name": "summary", "data_type": "text", "is_nullable": "NO", "default": None, "description": "Short AI summary of ticket content."},
+            {"name": "image_enriched", "data_type": "boolean", "is_nullable": "NO", "default": "false", "description": "Whether image context was used."},
+            {"name": "latitude", "data_type": "float", "is_nullable": "YES", "default": None, "description": "Optional extracted geo latitude."},
+            {"name": "longitude", "data_type": "float", "is_nullable": "YES", "default": None, "description": "Optional extracted geo longitude."},
+            {"name": "formatted_address", "data_type": "string", "is_nullable": "NO", "default": "''", "description": "Normalized address text from analysis."},
+        ],
+        "primary_key": ["ticket_id"],
+        "foreign_keys": [
+            {"column": "ticket_id", "references_table": "public.tickets", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.ticket_assignments",
+        "description": "Ticket-to-manager assignment bridge.",
+        "columns": [
+            {"name": "ticket_id", "data_type": "uuid", "is_nullable": "NO", "default": None, "description": "FK to ticket."},
+            {"name": "manager_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to manager."},
+        ],
+        "primary_key": ["ticket_id", "manager_id"],
+        "foreign_keys": [
+            {"column": "ticket_id", "references_table": "public.tickets", "references_column": "id"},
+            {"column": "manager_id", "references_table": "public.managers", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.ticket_attachments",
+        "description": "Many-to-many mapping between tickets and attachments.",
+        "columns": [
+            {"name": "ticket_id", "data_type": "uuid", "is_nullable": "NO", "default": None, "description": "FK to ticket."},
+            {"name": "attachment_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to attachment."},
+        ],
+        "primary_key": ["ticket_id", "attachment_id"],
+        "foreign_keys": [
+            {"column": "ticket_id", "references_table": "public.tickets", "references_column": "id"},
+            {"column": "attachment_id", "references_table": "public.attachments", "references_column": "id"},
+        ],
+    },
+    {
+        "table": "public.tickets",
+        "description": "Primary ticket entity submitted by clients/users.",
+        "columns": [
+            {"name": "id", "data_type": "uuid", "is_nullable": "NO", "default": None, "description": "Ticket ID."},
+            {"name": "gender_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to gender dimension."},
+            {"name": "date_of_birth", "data_type": "date", "is_nullable": "NO", "default": None, "description": "Client birth date."},
+            {"name": "description", "data_type": "string", "is_nullable": "NO", "default": "''", "description": "Raw client request text."},
+            {"name": "segment_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to client segment."},
+            {"name": "address_id", "data_type": "integer", "is_nullable": "NO", "default": None, "description": "FK to normalized address."},
+        ],
+        "primary_key": ["id"],
+        "foreign_keys": [
+            {"column": "gender_id", "references_table": "public.genders", "references_column": "id"},
+            {"column": "segment_id", "references_table": "public.client_segments", "references_column": "id"},
+            {"column": "address_id", "references_table": "public.addresses", "references_column": "id"},
+        ],
+    },
+]
+
+
+HARD_CODED_RELATIONSHIPS: list[dict[str, str]] = [
+    {"from_table": "public.addresses", "from_column": "country_id", "to_table": "public.countries", "to_column": "id"},
+    {"from_table": "public.addresses", "from_column": "region_id", "to_table": "public.regions", "to_column": "id"},
+    {"from_table": "public.addresses", "from_column": "city_id", "to_table": "public.cities", "to_column": "id"},
+    {"from_table": "public.attachments", "from_column": "type", "to_table": "public.attachment_types", "to_column": "id"},
+    {"from_table": "public.cities", "from_column": "region_id", "to_table": "public.regions", "to_column": "id"},
+    {"from_table": "public.manager_skills", "from_column": "manager_id", "to_table": "public.managers", "to_column": "id"},
+    {"from_table": "public.manager_skills", "from_column": "skill_id", "to_table": "public.skills", "to_column": "id"},
+    {"from_table": "public.managers", "from_column": "position_id", "to_table": "public.manager_positions", "to_column": "id"},
+    {"from_table": "public.managers", "from_column": "city_id", "to_table": "public.cities", "to_column": "id"},
+    {"from_table": "public.offices", "from_column": "city_id", "to_table": "public.cities", "to_column": "id"},
+    {"from_table": "public.regions", "from_column": "country_id", "to_table": "public.countries", "to_column": "id"},
+    {"from_table": "public.ticket_analysis", "from_column": "ticket_id", "to_table": "public.tickets", "to_column": "id"},
+    {"from_table": "public.ticket_assignments", "from_column": "ticket_id", "to_table": "public.tickets", "to_column": "id"},
+    {"from_table": "public.ticket_assignments", "from_column": "manager_id", "to_table": "public.managers", "to_column": "id"},
+    {"from_table": "public.ticket_attachments", "from_column": "ticket_id", "to_table": "public.tickets", "to_column": "id"},
+    {"from_table": "public.ticket_attachments", "from_column": "attachment_id", "to_table": "public.attachments", "to_column": "id"},
+    {"from_table": "public.tickets", "from_column": "gender_id", "to_table": "public.genders", "to_column": "id"},
+    {"from_table": "public.tickets", "from_column": "segment_id", "to_table": "public.client_segments", "to_column": "id"},
+    {"from_table": "public.tickets", "from_column": "address_id", "to_table": "public.addresses", "to_column": "id"},
+]
+
+
+def _build_hard_coded_schema_catalog() -> dict[str, Any]:
+    relationships: list[dict[str, Any]] = []
+    for rel in HARD_CODED_RELATIONSHIPS:
+        relation = dict(rel)
+        relation["join_condition"] = (
+            f"{relation['from_table']}.{relation['from_column']} = "
+            f"{relation['to_table']}.{relation['to_column']}"
+        )
+        relationships.append(relation)
+
+    tables = sorted(deepcopy(HARD_CODED_TABLES), key=lambda item: item["table"])
+    relationships = sorted(
+        relationships,
+        key=lambda rel: (rel["from_table"], rel["to_table"], rel["from_column"], rel["to_column"]),
+    )
+
+    return {
+        "source": "hardcoded_from_backend/infrastructure/db/models",
+        "table_count": len(tables),
+        "relationship_count": len(relationships),
+        "table_names": [table["table"] for table in tables],
+        "tables": tables,
+        "relationships": relationships,
+    }
+
+
+HARD_CODED_SCHEMA_CATALOG = _build_hard_coded_schema_catalog()
+
+
+SQL_CANDIDATE_SYSTEM_PROMPT = (
+    "You generate PostgreSQL NL2SQL candidates. "
+    "Return distinct candidate queries that could answer the user question. "
+    "Strict rules: one SELECT/CTE statement per candidate, no DML/DDL, no invented tables/columns, "
+    "use JOINs only when required to retrieve requested data, and qualify columns with table aliases. "
+    "All string filters must be case-insensitive. "
+    "For every string comparison, build the WHERE predicate from original+translated lowercase variants. "
+    "For exact matching use LOWER(column) IN (...lowered translated variants...). "
+    "For contains matching use LOWER(column) LIKE ANY(ARRAY[...lowered translated variants with wildcards...]). "
+    "For language filters (RU/KZ/EN), include aliases and translations in the same variant array."
+)
+
+
+SQL_CANDIDATE_SELECTION_SYSTEM_PROMPT = (
+    "You choose the best SQL candidate based on execution summaries. "
+    "Pick the candidate that best answers the original question with correct semantics and useful rows. "
+    "Prefer successful candidates with relevant columns and non-empty results."
+)
+
+
+TRANSLATION_VARIANTS_SYSTEM_PROMPT = (
+    "You expand one filter string into equivalent translations for SQL filtering. "
+    "Return only direct equivalents of the same concept in RU, KZ, and EN. "
+    "No explanations, no morphology lists, no unrelated synonyms."
+)
+
+
+LANGUAGE_ALIASES: dict[str, list[str]] = {
+    "ru": [
+        "ru",
+        "rus",
+        "russian",
+        "russkiy",
+        "рус",
+        "русский",
+        "русский язык",
+    ],
+    "kz": [
+        "kz",
+        "kaz",
+        "kazakh",
+        "kazakh language",
+        "қаз",
+        "қазақ",
+        "қазақша",
+        "каз",
+        "казах",
+        "казахский",
+    ],
+    "en": [
+        "en",
+        "eng",
+        "english",
+        "англ",
+        "английский",
+        "английский язык",
+    ],
+}
+
+
+def _normalize_string(value: str) -> str:
+    return value.strip().lower()
+
+
+def _unique_non_empty(values: list[str]) -> list[str]:
+    unique_values: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_string(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_values.append(normalized)
+    return unique_values
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _resolve_language_aliases(value: str) -> dict[str, Any]:
+    normalized = _normalize_string(value)
+    for canonical, aliases in LANGUAGE_ALIASES.items():
+        normalized_aliases = {_normalize_string(alias) for alias in aliases}
+        if normalized in normalized_aliases:
+            values = sorted(normalized_aliases)
+            return {
+                "canonical": canonical,
+                "aliases": values,
+                "matched": True,
+            }
+
+    return {
+        "canonical": normalized,
+        "aliases": [normalized],
+        "matched": False,
+    }
+
+
+async def _translate_filter_variants(value: str) -> list[str]:
+    base = _normalize_string(value)
+    if not base:
+        return []
+
+    payload = {
+        "value": value,
+        "target_languages": ["ru", "kz", "en"],
+        "max_variants": 12,
+    }
+    translated_values: list[str] = []
+
+    try:
+        translator = llm.with_structured_output(StringTranslationVariants)
+        response = await translator.ainvoke(
+            [
+                ("system", TRANSLATION_VARIANTS_SYSTEM_PROMPT),
+                ("human", json.dumps(payload, ensure_ascii=False)),
+            ]
+        )
+        translated_values = response.variants
+    except Exception:
+        logger.exception("Failed to expand translated string variants; using original filter only")
+
+    variants = _unique_non_empty([base, *translated_values])
+    expanded_variants: list[str] = []
+    for variant in variants:
+        language_resolved = _resolve_language_aliases(variant)
+        if language_resolved["matched"]:
+            expanded_variants.extend(language_resolved["aliases"])
+        else:
+            expanded_variants.append(variant)
+
+    return _unique_non_empty(expanded_variants)
+
+
+def _escape_sql_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
+async def _build_ci_string_predicate(
+    column: str,
+    value: str,
+    mode: str = "contains",
+    language_aware: bool = False,
+) -> dict[str, Any]:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"exact", "contains"}:
+        normalized_mode = "contains"
+
+    translated_variants = await _translate_filter_variants(value)
+    if not translated_variants:
+        translated_variants = [_normalize_string(value)]
+
+    resolved_language = _resolve_language_aliases(value)
+    if language_aware and resolved_language["matched"]:
+        translated_variants = _unique_non_empty(
+            [*translated_variants, *resolved_language["aliases"]]
+        )
+
+    escaped_variants = [_escape_sql_literal(item) for item in translated_variants]
+    if normalized_mode == "exact" or language_aware:
+        sql_values = ", ".join(f"'{item}'" for item in escaped_variants)
+        predicate = f"LOWER({column}) IN ({sql_values})"
+    else:
+        like_array = ", ".join(f"'%{item}%'" for item in escaped_variants)
+        predicate = f"LOWER({column}) LIKE ANY (ARRAY[{like_array}])"
+
+    return {
+        "mode": "exact" if language_aware else normalized_mode,
+        "language_aware": language_aware,
+        "canonical_language": resolved_language["canonical"] if language_aware else None,
+        "values_used": translated_variants,
+        "predicate": predicate,
+    }
 
 
 def _strip_sql_fences(sql: str) -> str:
@@ -333,152 +825,321 @@ async def _execute_query(query: str, max_rows: int) -> dict[str, Any]:
 
 
 async def _get_schema_catalog() -> dict[str, Any]:
-    tables_stmt = text(
-        """
-        SELECT table_schema, table_name
-        FROM information_schema.tables
-        WHERE table_type = 'BASE TABLE'
-          AND table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY table_schema, table_name
-        """
-    )
+    return deepcopy(HARD_CODED_SCHEMA_CATALOG)
 
-    columns_stmt = text(
-        """
-        SELECT
-            c.table_schema,
-            c.table_name,
-            c.column_name,
-            c.data_type,
-            c.is_nullable,
-            c.column_default,
-            c.ordinal_position
-        FROM information_schema.columns c
-        JOIN information_schema.tables t
-          ON t.table_schema = c.table_schema
-         AND t.table_name = c.table_name
-        WHERE t.table_type = 'BASE TABLE'
-          AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY c.table_schema, c.table_name, c.ordinal_position
-        """
-    )
 
-    pk_stmt = text(
-        """
-        SELECT
-            tc.table_schema,
-            tc.table_name,
-            kcu.column_name,
-            kcu.ordinal_position
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-         AND tc.table_name = kcu.table_name
-        WHERE tc.constraint_type = 'PRIMARY KEY'
-          AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY tc.table_schema, tc.table_name, kcu.ordinal_position
-        """
-    )
+def _schema_catalog_to_text(schema_catalog: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for table in schema_catalog["tables"]:
+        lines.append(f"Table {table['table']}: {table.get('description', '')}")
 
-    fk_stmt = text(
-        """
-        SELECT
-            tc.table_schema AS from_schema,
-            tc.table_name AS from_table,
-            kcu.column_name AS from_column,
-            ccu.table_schema AS to_schema,
-            ccu.table_name AS to_table,
-            ccu.column_name AS to_column
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-         AND tc.table_name = kcu.table_name
-        JOIN information_schema.constraint_column_usage ccu
-          ON ccu.constraint_name = tc.constraint_name
-         AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type = 'FOREIGN KEY'
-          AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-          AND ccu.table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY from_schema, from_table, from_column
-        """
-    )
+        primary_keys = set(table.get("primary_key", []))
+        fk_targets = {
+            fk["column"]: f"{fk['references_table']}.{fk['references_column']}"
+            for fk in table.get("foreign_keys", [])
+        }
+        for column in table.get("columns", []):
+            markers: list[str] = []
+            column_name = column["name"]
+            if column_name in primary_keys:
+                markers.append("PK")
+            if column_name in fk_targets:
+                markers.append(f"FK->{fk_targets[column_name]}")
+            marker_suffix = f" [{', '.join(markers)}]" if markers else ""
+            description = column.get("description", "")
+            lines.append(
+                f"  - {column_name} ({column.get('data_type', 'unknown')})"
+                f"{marker_suffix}: {description}"
+            )
+
+    lines.append("Relationships:")
+    for relationship in schema_catalog["relationships"]:
+        lines.append(f"  - {relationship['join_condition']}")
+
+    return "\n".join(lines)
+
+
+def _normalize_sql_for_dedup(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql).strip().lower()
+
+
+async def _generate_sql_candidates(
+    question: str,
+    top_k: int,
+    max_rows: int,
+) -> dict[str, Any]:
+    clamped_top_k = max(1, min(int(top_k), NL2SQL_CANDIDATE_MAX_K))
+    schema_catalog = await _get_schema_catalog()
+    schema_text = _schema_catalog_to_text(schema_catalog)
+
+    payload = {
+        "question": question.strip(),
+        "top_k": clamped_top_k,
+        "max_rows": max_rows,
+        "schema_text": schema_text,
+        "string_filter_policy": {
+            "case_insensitive": True,
+            "default_mode": "contains",
+            "exact_mode_template": "LOWER(column) IN (...lowered translated variants...)",
+            "contains_mode_template": (
+                "LOWER(column) LIKE ANY(ARRAY['%...lowered translated variant...%', ...])"
+            ),
+            "language_field_rule": (
+                "For string language filters, include RU/KZ/EN alias+translation variants"
+            ),
+        },
+        "language_aliases": LANGUAGE_ALIASES,
+    }
 
     try:
-        async with engine.connect() as conn:
-            table_rows = (await conn.execute(tables_stmt)).mappings().all()
-            column_rows = (await conn.execute(columns_stmt)).mappings().all()
-            pk_rows = (await conn.execute(pk_stmt)).mappings().all()
-            fk_rows = (await conn.execute(fk_stmt)).mappings().all()
-    except SQLAlchemyError as exc:
-        return {"error": f"Failed to load schema catalog: {exc}"}
-
-    table_map: dict[str, dict[str, Any]] = {}
-    for row in table_rows:
-        qualified_table = f"{row['table_schema']}.{row['table_name']}"
-        table_map[qualified_table] = {
-            "table": qualified_table,
-            "columns": [],
-            "primary_key": [],
-            "foreign_keys": [],
-        }
-
-    for row in column_rows:
-        qualified_table = f"{row['table_schema']}.{row['table_name']}"
-        table_map.setdefault(
-            qualified_table,
-            {"table": qualified_table, "columns": [], "primary_key": [], "foreign_keys": []},
+        generator = llm.with_structured_output(SQLCandidateSet)
+        candidate_set = await generator.ainvoke(
+            [
+                ("system", SQL_CANDIDATE_SYSTEM_PROMPT),
+                ("human", json.dumps(payload, ensure_ascii=True)),
+            ]
         )
-        table_map[qualified_table]["columns"].append(
+    except Exception as exc:
+        return {"error": f"Failed to generate SQL candidates: {exc}"}
+
+    candidates: list[dict[str, str]] = []
+    seen_sql: set[str] = set()
+    for candidate in candidate_set.candidates:
+        is_safe, validated_or_error = _enforce_read_only(candidate.sql, max_rows=max_rows)
+        if not is_safe:
+            continue
+
+        normalized_sql = _normalize_sql_for_dedup(validated_or_error)
+        if normalized_sql in seen_sql:
+            continue
+        seen_sql.add(normalized_sql)
+
+        candidates.append(
             {
-                "name": row["column_name"],
-                "data_type": row["data_type"],
-                "is_nullable": row["is_nullable"],
-                "default": row["column_default"],
+                "sql": validated_or_error,
+                "rationale": candidate.rationale.strip(),
+            }
+        )
+        if len(candidates) >= clamped_top_k:
+            break
+
+    if not candidates:
+        return {"error": "No valid SQL candidates were generated."}
+
+    return {
+        "question": question,
+        "top_k_requested": top_k,
+        "top_k_used": clamped_top_k,
+        "candidates": candidates,
+    }
+
+
+async def _select_best_candidate_with_llm(
+    question: str,
+    candidate_summaries: list[dict[str, Any]],
+) -> tuple[int, str] | None:
+    payload = {
+        "question": question,
+        "candidates": candidate_summaries,
+    }
+    try:
+        selector = llm.with_structured_output(SQLCandidateSelection)
+        selection = await selector.ainvoke(
+            [
+                ("system", SQL_CANDIDATE_SELECTION_SYSTEM_PROMPT),
+                ("human", json.dumps(payload, ensure_ascii=True)),
+            ]
+        )
+    except Exception:
+        logger.exception("Failed to select best SQL candidate with LLM; falling back to heuristic")
+        return None
+
+    candidate_index = int(selection.best_candidate_index)
+    if candidate_index < 0 or candidate_index >= len(candidate_summaries):
+        return None
+    return candidate_index, selection.reason.strip()
+
+
+def _heuristic_candidate_score(question: str, sql: str, result: dict[str, Any]) -> int:
+    if "error" in result:
+        return -10_000
+
+    score = 0
+    lower_question = question.lower()
+    lower_sql = sql.lower()
+    row_count = int(result.get("row_count", 0))
+
+    if row_count > 0:
+        score += 40
+    if " group by " in lower_sql:
+        score += 4
+
+    if any(token in lower_question for token in ("count", "how many", "number of", "total")):
+        if "count(" in lower_sql:
+            score += 20
+        if row_count == 1:
+            score += 8
+
+    if any(token in lower_question for token in ("average", "avg", "mean")) and "avg(" in lower_sql:
+        score += 18
+    if any(token in lower_question for token in ("sum", "total")) and "sum(" in lower_sql:
+        score += 14
+    if any(token in lower_question for token in ("top", "highest", "lowest", "most", "least")):
+        if " order by " in lower_sql:
+            score += 12
+
+    if row_count == 0:
+        score -= 12
+
+    return score
+
+
+def _select_best_candidate_with_heuristic(
+    question: str,
+    candidate_results: list[dict[str, Any]],
+) -> tuple[int, str]:
+    best_index = 0
+    best_score = -10_001
+
+    for index, candidate in enumerate(candidate_results):
+        score = _heuristic_candidate_score(
+            question=question,
+            sql=candidate["sql"],
+            result=candidate["result"],
+        )
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    return best_index, f"heuristic_score={best_score}"
+
+
+def _format_markdown_table(columns: list[str], rows: list[dict[str, Any]]) -> str:
+    if not columns:
+        return ""
+
+    def _sanitize(value: Any) -> str:
+        text = "" if value is None else str(value)
+        text = text.replace("\n", " ").replace("|", "\\|")
+        return text
+
+    header = "| " + " | ".join(columns) + " |"
+    separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+    lines = [header, separator]
+    for row in rows:
+        line = "| " + " | ".join(_sanitize(row.get(column)) for column in columns) + " |"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _find_table_definition(
+    schema_catalog: dict[str, Any],
+    table_name: str,
+) -> dict[str, Any] | None:
+    normalized = _normalize_qualified_table_name(table_name)
+    normalized_lower = normalized.lower()
+
+    for table in schema_catalog["tables"]:
+        qualified = table["table"]
+        if qualified.lower() == normalized_lower:
+            return table
+
+    if "." not in table_name:
+        short_name = table_name.strip().strip('"').lower()
+        matches = [table for table in schema_catalog["tables"] if table["table"].split(".", 1)[1].lower() == short_name]
+        if len(matches) == 1:
+            return matches[0]
+
+    return None
+
+
+async def _run_and_select_best_sql_candidate(
+    question: str,
+    top_k: int,
+    max_rows: int,
+) -> dict[str, Any]:
+    clamped_max_rows = max(1, min(int(max_rows), NL2SQL_MAX_ROWS))
+    generated = await _generate_sql_candidates(
+        question=question,
+        top_k=top_k,
+        max_rows=clamped_max_rows,
+    )
+    if "error" in generated:
+        return generated
+
+    candidates: list[dict[str, str]] = generated["candidates"]
+    execution_tasks = [
+        _execute_query(query=candidate["sql"], max_rows=clamped_max_rows)
+        for candidate in candidates
+    ]
+    execution_results = await asyncio.gather(*execution_tasks)
+
+    candidate_results: list[dict[str, Any]] = []
+    candidate_summaries: list[dict[str, Any]] = []
+    for index, (candidate, result) in enumerate(zip(candidates, execution_results), start=1):
+        candidate_results.append(
+            {
+                "index": index - 1,
+                "rank": index,
+                "sql": candidate["sql"],
+                "rationale": candidate["rationale"],
+                "result": result,
+            }
+        )
+        candidate_summaries.append(
+            {
+                "index": index - 1,
+                "rank": index,
+                "sql": candidate["sql"],
+                "error": result.get("error"),
+                "row_count": result.get("row_count"),
+                "columns": result.get("columns", []),
+                "rows_preview": (result.get("rows") or [])[:5],
             }
         )
 
-    for row in pk_rows:
-        qualified_table = f"{row['table_schema']}.{row['table_name']}"
-        if qualified_table in table_map:
-            table_map[qualified_table]["primary_key"].append(row["column_name"])
+    if not candidate_results:
+        return {"error": "No SQL candidates were available for execution."}
 
-    relationships: list[dict[str, Any]] = []
-    for row in fk_rows:
-        from_table = f"{row['from_schema']}.{row['from_table']}"
-        to_table = f"{row['to_schema']}.{row['to_table']}"
-        relationship = {
-            "from_table": from_table,
-            "from_column": row["from_column"],
-            "to_table": to_table,
-            "to_column": row["to_column"],
-            "join_condition": f"{from_table}.{row['from_column']} = {to_table}.{row['to_column']}",
+    successful_candidates = [candidate for candidate in candidate_results if "error" not in candidate["result"]]
+    if not successful_candidates:
+        first_failed = candidate_results[0]
+        return {
+            "error": "All SQL candidates failed to execute.",
+            "selected_sql": first_failed["sql"],
+            "query_error": first_failed["result"].get("error", "Unknown SQL execution error."),
         }
-        relationships.append(relationship)
 
-        if from_table in table_map:
-            table_map[from_table]["foreign_keys"].append(
-                {
-                    "column": row["from_column"],
-                    "references_table": to_table,
-                    "references_column": row["to_column"],
-                }
-            )
-
-    tables = sorted(table_map.values(), key=lambda item: item["table"])
-    relationships = sorted(
-        relationships,
-        key=lambda rel: (rel["from_table"], rel["to_table"], rel["from_column"], rel["to_column"]),
+    llm_choice = await _select_best_candidate_with_llm(
+        question=question,
+        candidate_summaries=candidate_summaries,
     )
-    table_names = [table["table"] for table in tables]
+    if llm_choice is None:
+        selected_index, _ = _select_best_candidate_with_heuristic(
+            question=question,
+            candidate_results=candidate_results,
+        )
+    else:
+        selected_index, _ = llm_choice
+
+    selected_candidate = candidate_results[selected_index]
+    selected_result = selected_candidate["result"]
+    if "error" in selected_result:
+        selected_candidate = successful_candidates[0]
+        selected_result = selected_candidate["result"]
+
+    selected_rows = selected_result.get("rows", [])
+    selected_columns = selected_result.get("columns", [])
+    rows_preview = selected_rows[:NL2SQL_CANDIDATE_RESULT_PREVIEW_ROWS]
+    table_markdown = _format_markdown_table(selected_columns, rows_preview)
 
     return {
-        "table_count": len(tables),
-        "relationship_count": len(relationships),
-        "table_names": table_names,
-        "tables": tables,
-        "relationships": relationships,
+        "selected_sql": selected_candidate["sql"],
+        "row_count": selected_result.get("row_count", 0),
+        "columns": selected_columns,
+        "rows": rows_preview,
+        "rows_truncated": len(selected_rows) > len(rows_preview),
+        "table_markdown": table_markdown,
     }
 
 
@@ -583,7 +1244,8 @@ async def _upload_chart_image_via_repo(
 @tool
 async def get_schema_relationships() -> dict[str, Any]:
     """
-    Return full DB schema context: all tables, columns, PKs, FKs, and relationship graph.
+    Return hardcoded schema context from infrastructure/db/models:
+    tables, column descriptions, PKs, FKs, and relationship graph.
     Use this before writing SQL.
     """
     return await _get_schema_catalog()
@@ -685,115 +1347,109 @@ async def suggest_joins(tables: str) -> dict[str, Any]:
 
 @tool
 async def list_tables() -> dict[str, Any]:
-    """List all user-facing tables available in the database."""
-    stmt = text(
-        """
-        SELECT table_schema, table_name
-        FROM information_schema.tables
-        WHERE table_type = 'BASE TABLE'
-          AND table_schema NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY table_schema, table_name
-        """
-    )
-
-    try:
-        async with engine.connect() as conn:
-            result = await conn.execute(stmt)
-            rows = result.mappings().all()
-    except SQLAlchemyError as exc:
-        return {"error": f"Failed to list tables: {exc}"}
-
-    tables = [f"{row['table_schema']}.{row['table_name']}" for row in rows]
-    return {"count": len(tables), "tables": tables}
+    """List all user-facing tables from the hardcoded model schema catalog."""
+    schema_catalog = await _get_schema_catalog()
+    return {
+        "count": schema_catalog["table_count"],
+        "tables": schema_catalog["table_names"],
+        "source": schema_catalog["source"],
+    }
 
 
 @tool
 async def describe_table(table_name: str) -> dict[str, Any]:
-    """Describe columns and key relations for one table (input: 'table' or 'schema.table')."""
-    schema_name, table = _parse_table_name(table_name)
-
-    columns_stmt = text(
-        """
-        SELECT
-            column_name,
-            data_type,
-            is_nullable,
-            column_default
-        FROM information_schema.columns
-        WHERE table_schema = :schema_name
-          AND table_name = :table_name
-        ORDER BY ordinal_position
-        """
-    )
-
-    pk_stmt = text(
-        """
-        SELECT kcu.column_name
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-        WHERE tc.table_schema = :schema_name
-          AND tc.table_name = :table_name
-          AND tc.constraint_type = 'PRIMARY KEY'
-        ORDER BY kcu.ordinal_position
-        """
-    )
-
-    fk_stmt = text(
-        """
-        SELECT
-            kcu.column_name,
-            ccu.table_schema AS foreign_table_schema,
-            ccu.table_name AS foreign_table_name,
-            ccu.column_name AS foreign_column_name
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-        JOIN information_schema.constraint_column_usage ccu
-          ON ccu.constraint_name = tc.constraint_name
-         AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type = 'FOREIGN KEY'
-          AND tc.table_schema = :schema_name
-          AND tc.table_name = :table_name
-        ORDER BY kcu.column_name
-        """
-    )
-
-    try:
-        async with engine.connect() as conn:
-            columns_result = await conn.execute(
-                columns_stmt,
-                {"schema_name": schema_name, "table_name": table},
-            )
-            columns = [dict(row) for row in columns_result.mappings().all()]
-
-            if not columns:
-                return {
-                    "error": f"Table '{schema_name}.{table}' not found or has no columns."
-                }
-
-            pk_result = await conn.execute(
-                pk_stmt,
-                {"schema_name": schema_name, "table_name": table},
-            )
-            primary_key = [row["column_name"] for row in pk_result.mappings().all()]
-
-            fk_result = await conn.execute(
-                fk_stmt,
-                {"schema_name": schema_name, "table_name": table},
-            )
-            foreign_keys = [dict(row) for row in fk_result.mappings().all()]
-    except SQLAlchemyError as exc:
-        return {"error": f"Failed to describe table '{schema_name}.{table}': {exc}"}
+    """Describe one table using hardcoded metadata (input: 'table' or 'schema.table')."""
+    schema_catalog = await _get_schema_catalog()
+    table = _find_table_definition(schema_catalog=schema_catalog, table_name=table_name)
+    if table is None:
+        normalized = _normalize_qualified_table_name(table_name)
+        return {"error": f"Table '{normalized}' not found in hardcoded schema catalog."}
 
     return {
-        "table": f"{schema_name}.{table}",
-        "columns": columns,
-        "primary_key": primary_key,
-        "foreign_keys": foreign_keys,
+        "table": table["table"],
+        "description": table.get("description"),
+        "columns": table.get("columns", []),
+        "primary_key": table.get("primary_key", []),
+        "foreign_keys": table.get("foreign_keys", []),
+        "source": schema_catalog["source"],
     }
+
+
+@tool
+async def build_string_filter_predicate(
+    column: str,
+    value: str,
+    mode: str = "contains",
+    language_aware: bool = False,
+) -> dict[str, Any]:
+    """
+    Build a case-insensitive SQL predicate for string filtering.
+    Always includes lowered translated variants of the original value (RU/KZ/EN).
+    exact -> LOWER(column) IN (...)
+    contains -> LOWER(column) LIKE ANY (ARRAY['%...%'])
+    If language_aware=true, forces exact IN semantics over alias+translation variants.
+    """
+    column_name = column.strip()
+    if not column_name:
+        return {"error": "column is required"}
+
+    raw_value = value.strip()
+    if not raw_value:
+        return {"error": "value is required"}
+
+    return await _build_ci_string_predicate(
+        column=column_name,
+        value=raw_value,
+        mode=mode,
+        language_aware=_to_bool(language_aware),
+    )
+
+
+@tool
+async def build_sql_candidates(
+    question: str,
+    top_k: int = NL2SQL_CANDIDATE_TOP_K,
+    max_rows: int = NL2SQL_MAX_ROWS,
+) -> dict[str, Any]:
+    """
+    Build top-k SQL candidate queries for a natural-language question using hardcoded schema.
+    """
+    generated = await _generate_sql_candidates(
+        question=question,
+        top_k=top_k,
+        max_rows=max(1, min(int(max_rows), NL2SQL_MAX_ROWS)),
+    )
+    if "error" in generated:
+        return generated
+
+    candidates = [
+        {
+            "rank": index,
+            "sql": candidate["sql"],
+        }
+        for index, candidate in enumerate(generated["candidates"], start=1)
+    ]
+    return {
+        "question": generated["question"],
+        "top_k_used": generated["top_k_used"],
+        "candidates": candidates,
+    }
+
+
+@tool
+async def run_sql_candidates_and_select_best(
+    question: str,
+    top_k: int = NL2SQL_CANDIDATE_TOP_K,
+    max_rows: int = NL2SQL_MAX_ROWS,
+) -> dict[str, Any]:
+    """
+    End-to-end NL2SQL: build top-k SQL candidates, run all, and return only the best result as table_markdown.
+    """
+    return await _run_and_select_best_sql_candidate(
+        question=question,
+        top_k=top_k,
+        max_rows=max_rows,
+    )
 
 
 @tool
@@ -954,14 +1610,20 @@ async def generate_chart_image(
 SYSTEM_PROMPT = (
     "You are an NL2SQL assistant for the Freedom Routing backend. "
     "Use tools to inspect schema and run read-only SQL. "
-    "Before generating SQL, always call get_schema_relationships to load all schemas and relationships. "
-    "For multi-table queries, call suggest_joins with relevant tables and use those join conditions. "
-    "Workflow for data questions: get_schema_relationships -> suggest_joins (if multi-table) -> run_sql_query -> answer. "
-    "Workflow for analytics requests: analytics_summary -> explanation. "
-    "Workflow for chart/image requests: get_schema_relationships -> analytics_summary (optional) -> generate_chart_image -> return image_markdown and short explanation. "
+    "Before generating SQL, always call get_schema_relationships to load all tables/columns/relationships. "
+    "Primary workflow for data questions: get_schema_relationships -> run_sql_candidates_and_select_best -> respond from tool output. "
+    "If needed, you can inspect alternatives via build_sql_candidates and run_sql_query manually. "
+    "Use suggest_joins only when the question requires data from multiple related tables. "
+    "Workflow for analytics requests: run_sql_candidates_and_select_best or analytics_summary, then explain concisely. "
+    "Workflow for chart/image requests: get_schema_relationships -> run_sql_candidates_and_select_best -> generate_chart_image (using selected_sql) -> return image_markdown and a short explanation. "
+    "Do not output intermediate reasoning, candidate comparisons, or tool traces. "
+    "For SQL answers, output the final result table from table_markdown and a short direct statement only. "
+    "For string filtering, always use case-insensitive predicates with lowered translated variants of the filter value. "
+    "Use build_string_filter_predicate for every WHERE clause string comparison. "
+    "For language filters, support RU/KZ/EN aliases and translations using lowercase IN semantics. "
     "Never invent columns/tables. "
-    "Prefer explicit INNER/LEFT JOIN syntax over subqueries when data spans multiple models. "
-    "Never use implicit comma joins. "
+    "Do not force JOIN usage; use JOIN only when needed to acquire required data. "
+    "If JOIN is needed, use explicit INNER/LEFT JOIN syntax and never implicit comma joins. "
     "Use explicit column names with table qualifiers. "
     "If no rows are returned, state that clearly. "
     "Do not attempt INSERT/UPDATE/DELETE/DDL."
@@ -976,6 +1638,9 @@ nl2sql_agent_graph = create_agent(
         suggest_joins,
         list_tables,
         describe_table,
+        build_string_filter_predicate,
+        build_sql_candidates,
+        run_sql_candidates_and_select_best,
         run_sql_query,
         analytics_summary,
         generate_chart_image,

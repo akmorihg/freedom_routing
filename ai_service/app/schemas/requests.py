@@ -17,8 +17,17 @@ class AddressInfo(BaseModel):
     building: str = Field(default="", description="Building / house number")
 
     def to_query(self) -> str:
-        """Build a single-line geocoding query from non-empty parts."""
-        parts = [self.country, self.region, self.city, self.street, self.building]
+        """Build a single-line geocoding query from non-empty parts.
+
+        Order is specific → general (street, city, region, country)
+        which gives Google Geocoding the best chance of resolving
+        street-level addresses.
+        """
+        # Building + street combined (e.g. "ул. Садовая 7")
+        street_part = " ".join(
+            p.strip() for p in [self.street, self.building] if p.strip()
+        )
+        parts = [street_part, self.city, self.region, self.country]
         return ", ".join(p.strip() for p in parts if p.strip())
 
 

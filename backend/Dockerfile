@@ -1,19 +1,22 @@
-FROM ghcr.io/astral-sh/uv:python3.11-alpine
+FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=.
+    MPLCONFIGDIR=/tmp/matplotlib
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.5.6 /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 WORKDIR /backend
+COPY ./ /backend/
 
-# Copy only dependency files first for better caching
-COPY ./pyproject.toml ./uv.lock* ./
+ENV PYTHONPATH="/"
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
 
-# Install deps (creates/uses .venv)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-project --no-dev
-
-# Copy application code
-COPY . /backend
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
 
 EXPOSE 8000

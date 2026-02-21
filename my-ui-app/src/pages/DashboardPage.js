@@ -24,20 +24,42 @@ import {
   triggerRoutingFromDb,
 } from "../api/backendCrud";
 
-const urgencyColors = { 5: "#dc2626", 4: "#ea580c", 3: "#d97706", 2: "#65a30d", 1: "#16a34a" };
-const sentimentColors = { positive: "#16a34a", neutral: "#6b7280", negative: "#dc2626", mixed: "#d97706" };
+const getUrgencyColor = (score) => {
+  const num = parseInt(score, 10);
+  if (!num || num < 1) return "#6b7280";
+  // 1=green → 10=red, smooth gradient
+  const colors = [
+    "#16a34a", // 1  green
+    "#22c55e", // 2
+    "#65a30d", // 3  lime
+    "#a3e635", // 4
+    "#d97706", // 5  amber
+    "#ea580c", // 6  orange
+    "#f97316", // 7
+    "#ef4444", // 8  red-400
+    "#dc2626", // 9  red-600
+    "#991b1b", // 10 red-800
+  ];
+  return colors[Math.min(num, 10) - 1] || "#6b7280";
+};
+
+const sentimentColors = {
+  // English
+  positive: "#16a34a", neutral: "#6b7280", negative: "#dc2626", mixed: "#d97706",
+  // Russian
+  "позитивный": "#16a34a", "нейтральный": "#6b7280", "негативный": "#dc2626", "смешанный": "#d97706",
+};
 
 const UrgencyChip = ({ value }) => {
   if (!value || value === "-") return <span>-</span>;
-  const num = parseInt(value, 10);
-  const color = urgencyColors[num] || "#6b7280";
-  return <Chip label={value} size="small" sx={{ backgroundColor: color, color: "#fff", fontWeight: 700 }} />;
+  const color = getUrgencyColor(value);
+  return <Chip label={value} size="small" sx={{ bgcolor: color, color: "#fff", fontWeight: 700, "& .MuiChip-label": { color: "#fff" } }} />;
 };
 
 const SentimentChip = ({ value }) => {
   if (!value || value === "-") return <span>-</span>;
   const color = sentimentColors[String(value).toLowerCase()] || "#6b7280";
-  return <Chip label={value} size="small" sx={{ backgroundColor: color, color: "#fff", fontWeight: 600 }} />;
+  return <Chip label={value} size="small" sx={{ bgcolor: color, color: "#fff", fontWeight: 600, "& .MuiChip-label": { color: "#fff" } }} />;
 };
 
 const DashboardPage = ({ onBack }) => {
@@ -48,6 +70,7 @@ const DashboardPage = ({ onBack }) => {
   const [assignments, setAssignments] = useState([]);
   const [view, setView] = useState("load");
   const [loading, setLoading] = useState(false);
+  const [ticketSortOrder, setTicketSortOrder] = useState("none"); // "none" | "asc" | "desc"
   const [backendError, setBackendError] = useState("");
   const [actionStatus, setActionStatus] = useState(""); // "", "analyzing", "routing", "done"
   const [actionError, setActionError] = useState("");
@@ -540,7 +563,16 @@ const DashboardPage = ({ onBack }) => {
                   <TableCell>ID</TableCell>
                   <TableCell>Segment</TableCell>
                   <TableCell>Description</TableCell>
-                  <TableCell>Urgency</TableCell>
+                  <TableCell
+                    sx={{ cursor: "pointer", userSelect: "none", "&:hover": { background: "rgba(15,23,42,0.10)" } }}
+                    onClick={() =>
+                      setTicketSortOrder((prev) =>
+                        prev === "none" ? "desc" : prev === "desc" ? "asc" : "none"
+                      )
+                    }
+                  >
+                    Urgency {ticketSortOrder === "desc" ? "▼" : ticketSortOrder === "asc" ? "▲" : "⇅"}
+                  </TableCell>
                   <TableCell>Sentiment</TableCell>
                   <TableCell>Type</TableCell>
                   <TableCell>Language</TableCell>
@@ -549,7 +581,14 @@ const DashboardPage = ({ onBack }) => {
               </TableHead>
               <TableBody>
                 {ticketTableRows.length > 0 ? (
-                  ticketTableRows.map((row) => {
+                  [...ticketTableRows]
+                    .sort((a, b) => {
+                      if (ticketSortOrder === "none") return 0;
+                      const aVal = a.urgency === "-" ? 0 : parseInt(a.urgency, 10) || 0;
+                      const bVal = b.urgency === "-" ? 0 : parseInt(b.urgency, 10) || 0;
+                      return ticketSortOrder === "desc" ? bVal - aVal : aVal - bVal;
+                    })
+                    .map((row) => {
                     const assign = assignmentMap[row.id];
                     return (
                       <TableRow key={row.id}>
@@ -808,6 +847,28 @@ const DashboardPage = ({ onBack }) => {
             }}
           >
             Refresh Data
+          </Button>
+
+          <Button
+            variant="contained"
+            onClick={() => window.open("http://localhost:3000", "_blank")}
+            sx={{
+              borderRadius: 3,
+              minHeight: 48,
+              fontWeight: 700,
+              fontSize: "0.85rem",
+              background: "linear-gradient(120deg, #10b981 0%, #059669 50%, #047857 100%)",
+              boxShadow: "0 8px 20px rgba(5, 150, 105, 0.30)",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              "&:hover": {
+                background: "linear-gradient(120deg, #059669 0%, #047857 50%, #065f46 100%)",
+              },
+            }}
+          >
+            <span role="img" aria-label="AI" style={{ fontSize: "1.2rem" }}>🤖</span>
+            AI SQL Assistant
           </Button>
         </Box>
       </Box>

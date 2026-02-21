@@ -41,7 +41,7 @@ async def create_static_file(
             data=data,
             content_type=file.content_type,
         )
-        return {"bucket": bucket, "key": object_key, "etag": result.get("etag")}
+        return {"bucket": bucket, "key": object_key, "etag": result.get("etag"), "url": result.get("url")}
     except HTTPException:
         raise
     except Exception as e:
@@ -103,7 +103,7 @@ async def update_static_file(
             data=data,
             content_type=file.content_type,
         )
-        return {"bucket": bucket, "key": key, "etag": result.get("etag")}
+        return {"bucket": bucket, "key": key, "etag": result.get("etag"), "url": result.get("url")}
     except HTTPException:
         raise
     except Exception as e:

@@ -26,6 +26,38 @@ services:
       retries: 10
       start_period: 10s
 
+  langchain-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: langchain-server
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      - "2024:2024"
+    volumes:
+      - ./backend:/backend
+    command: ["uv", "run", "langgraph", "dev", "--host", "0.0.0.0", "--port", "2024"]
+  
+  agent-chat-ui:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./agent-chat-ui:/app
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./agent-chat-ui/.env
+    command: >
+      sh -lc "
+        corepack enable &&
+        pnpm install &&
+        pnpm dev --port 3000
+      "
+    depends_on:
+      - langchain-server
+
   redis:
     image: redis:7-alpine
     container_name: redis

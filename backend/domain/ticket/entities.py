@@ -43,6 +43,26 @@ class TicketEntity(BaseEntity):
 
 
 @dataclass
+class TicketAnalysisEntity(BaseEntity):
+    ticket_id: UUID
+
+    request_type: str = ""
+    sentiment: str = ""
+    urgency_score: int = 1
+    language: str = ""
+    summary: str = ""
+    image_enriched: bool = False
+
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    formatted_address: str = ""
+
+    @property
+    def primary_key(self) -> Union[Any, Dict[str, Any]]:
+        return self.ticket_id
+
+
+@dataclass
 class TicketAttachmentEntity(BaseEntity):
     ticket_id: UUID
     attachment_id: int

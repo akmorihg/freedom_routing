@@ -19,6 +19,7 @@ from backend.domain.ticket.entities import (
     AttachmentTypeEntity,
     AttachmentEntity,
     TicketEntity,
+    TicketAnalysisEntity,
     TicketAttachmentEntity,
 )
 
@@ -69,6 +70,21 @@ class TicketDTO(BaseModel):
     segment: Optional[ClientSegmentDTO] = None
     address: Optional[AddressDTO] = None
     attachments: List[AttachmentDTO] = Field(default_factory=list)
+
+
+class TicketAnalysisDTO(BaseModel):
+    ticket_id: UUID
+
+    request_type: str
+    sentiment: str
+    urgency_score: int = Field(..., ge=1, le=10)
+    language: str
+    summary: str
+    image_enriched: bool = False
+
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    formatted_address: str = ""
 
 
 # ============================================================
@@ -139,6 +155,34 @@ class TicketAddAttachmentsDTO(BaseModel):
     attachment_ids: List[int] = Field(default_factory=list)
 
 
+class TicketAnalysisCreateDTO(BaseModel):
+    ticket_id: UUID
+
+    request_type: str = Field(..., min_length=1, max_length=255)
+    sentiment: str = Field(..., min_length=1, max_length=255)
+    urgency_score: int = Field(..., ge=1, le=10)
+    language: str = Field(..., min_length=1, max_length=255)
+    summary: str = Field(..., min_length=1)
+    image_enriched: bool = Field(default=False)
+
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    formatted_address: str = Field(default="")
+
+
+class TicketAnalysisUpdateDTO(BaseModel):
+    request_type: Optional[str] = Field(None, min_length=1, max_length=255)
+    sentiment: Optional[str] = Field(None, min_length=1, max_length=255)
+    urgency_score: Optional[int] = Field(None, ge=1, le=10)
+    language: Optional[str] = Field(None, min_length=1, max_length=255)
+    summary: Optional[str] = Field(None, min_length=1)
+    image_enriched: Optional[bool] = None
+
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    formatted_address: Optional[str] = None
+
+
 # ============================================================
 # Helpers: dict/DTO -> Entity; Entity -> DTO
 # ============================================================
@@ -184,6 +228,21 @@ def _ticket_dto(e: TicketEntity) -> TicketDTO:
         description=e.description,
         segment_id=e.segment_id,
         address_id=e.address_id,
+    )
+
+
+def _ticket_analysis_dto(e: TicketAnalysisEntity) -> TicketAnalysisDTO:
+    return TicketAnalysisDTO(
+        ticket_id=e.ticket_id,
+        request_type=e.request_type,
+        sentiment=e.sentiment,
+        urgency_score=e.urgency_score,
+        language=e.language,
+        summary=e.summary,
+        image_enriched=e.image_enriched,
+        latitude=e.latitude,
+        longitude=e.longitude,
+        formatted_address=e.formatted_address,
     )
 
 
@@ -735,6 +794,107 @@ async def delete_attachment(
     except Exception as e:
         logger.exception("Error deleting attachment: %s", e)
         raise HTTPException(status_code=500, detail="Failed to delete attachment") from e
+
+
+# ============================================================
+# TICKET ANALYSIS CRUD
+# ============================================================
+
+@ticket_router.post("/analysis", response_model=TicketAnalysisDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def create_ticket_analysis(
+    repository_container: RepositoryContainer,
+    payload: TicketAnalysisCreateDTO,
+):
+    try:
+        repo = repository_container.ticket_analysis_repo_
+        entity = TicketAnalysisEntity(**payload.model_dump())
+        created = await repo.create(entity)
+        return _ticket_analysis_dto(created)
+    except Exception as e:
+        logger.exception("Error creating ticket analysis: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create ticket analysis") from e
+
+
+@ticket_router.get("/analysis/{ticket_id}", response_model=TicketAnalysisDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def get_ticket_analysis(
+    repository_container: RepositoryContainer,
+    ticket_id: UUID,
+):
+    try:
+        repo = repository_container.ticket_analysis_repo_
+        entity = await repo.get(ticket_id)
+        if not entity:
+            raise HTTPException(status_code=404, detail="Ticket analysis not found")
+        return _ticket_analysis_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting ticket analysis: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to get ticket analysis") from e
+
+
+@ticket_router.get("/analysis", response_model=List[TicketAnalysisDTO])
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def list_ticket_analyses(
+    repository_container: RepositoryContainer,
+):
+    try:
+        repo = repository_container.ticket_analysis_repo_
+        entities = await repo.get_all()
+        return [_ticket_analysis_dto(x) for x in entities]
+    except Exception as e:
+        logger.exception("Error listing ticket analyses: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list ticket analyses") from e
+
+
+@ticket_router.put("/analysis/{ticket_id}", response_model=TicketAnalysisDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def update_ticket_analysis(
+    repository_container: RepositoryContainer,
+    payload: TicketAnalysisUpdateDTO,
+    ticket_id: UUID,
+):
+    try:
+        repo = repository_container.ticket_analysis_repo_
+        existing = await repo.get(ticket_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Ticket analysis not found")
+
+        data = existing.to_dict()
+        data.update(payload.model_dump(exclude_unset=True))
+        data["ticket_id"] = ticket_id
+
+        updated = await repo.update(TicketAnalysisEntity(**data))
+        if not updated:
+            raise HTTPException(status_code=404, detail="Ticket analysis not found")
+
+        return _ticket_analysis_dto(updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating ticket analysis: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update ticket analysis") from e
+
+
+@ticket_router.delete("/analysis/{ticket_id}", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def delete_ticket_analysis(
+    repository_container: RepositoryContainer,
+    ticket_id: UUID,
+):
+    try:
+        repo = repository_container.ticket_analysis_repo_
+        ok = await repo.delete(ticket_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Ticket analysis not found")
+        return {"deleted": True, "ticket_id": str(ticket_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting ticket analysis: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to delete ticket analysis") from e
 
 
 # ============================================================

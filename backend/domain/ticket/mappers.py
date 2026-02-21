@@ -1,7 +1,14 @@
 from backend.core.base.mapper import BaseMapper
-from backend.domain.ticket.entities import AttachmentTypeEntity, AttachmentEntity, TicketEntity, TicketAttachmentEntity, \
-    GenderEntity, ClientSegmentEntity
-from backend.infrastructure.db.models import Ticket, TickerAttachments, Gender, ClientSegment
+from backend.domain.ticket.entities import (
+    AttachmentTypeEntity,
+    AttachmentEntity,
+    TicketEntity,
+    TicketAnalysisEntity,
+    TicketAttachmentEntity,
+    GenderEntity,
+    ClientSegmentEntity,
+)
+from backend.infrastructure.db.models import Ticket, TicketAnalysis, TickerAttachments, Gender, ClientSegment
 from backend.infrastructure.db.models.attachment import AttachmentType, Attachment
 
 
@@ -109,6 +116,41 @@ class TicketMapper(BaseMapper[Ticket, TicketEntity]):
             description=entity.description,
             segment_id=entity.segment_id,
             address_id=entity.address_id,
+        )
+
+
+class TicketAnalysisMapper(BaseMapper[TicketAnalysis, TicketAnalysisEntity]):
+    model = TicketAnalysis
+    entity = TicketAnalysisEntity
+
+    @classmethod
+    def to_entity(cls, model: TicketAnalysis, lazy: bool = False) -> TicketAnalysisEntity:
+        return TicketAnalysisEntity(
+            ticket_id=model.ticket_id,
+            request_type=model.request_type,
+            sentiment=model.sentiment,
+            urgency_score=model.urgency_score,
+            language=model.language,
+            summary=model.summary,
+            image_enriched=model.image_enriched,
+            latitude=model.latitude,
+            longitude=model.longitude,
+            formatted_address=model.formatted_address,
+        )
+
+    @classmethod
+    def to_model(cls, entity: TicketAnalysisEntity, lazy: bool = False) -> TicketAnalysis:
+        return TicketAnalysis(
+            ticket_id=entity.ticket_id,
+            request_type=entity.request_type,
+            sentiment=entity.sentiment,
+            urgency_score=entity.urgency_score,
+            language=entity.language,
+            summary=entity.summary,
+            image_enriched=entity.image_enriched,
+            latitude=entity.latitude,
+            longitude=entity.longitude,
+            formatted_address=entity.formatted_address,
         )
 
 

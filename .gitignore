@@ -72,3 +72,5 @@ Pipfile.lock
 
 # Local config
 *.local
+
+Tests/

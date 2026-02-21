@@ -21,6 +21,7 @@ from backend.domain.ticket.entities import (
     TicketEntity,
     TicketAnalysisEntity,
     TicketAttachmentEntity,
+    TicketAssignmentEntity,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,11 @@ class TicketAnalysisDTO(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     formatted_address: str = ""
+
+
+class TicketAssignmentDTO(BaseModel):
+    ticket_id: UUID
+    manager_id: int
 
 
 # ============================================================
@@ -183,6 +189,16 @@ class TicketAnalysisUpdateDTO(BaseModel):
     formatted_address: Optional[str] = None
 
 
+class TicketAssignmentCreateDTO(BaseModel):
+    ticket_id: UUID
+    manager_id: int = Field(..., gt=0)
+
+
+class TicketAssignmentUpdateDTO(BaseModel):
+    ticket_id: Optional[UUID] = None
+    manager_id: Optional[int] = Field(None, gt=0)
+
+
 # ============================================================
 # Helpers: dict/DTO -> Entity; Entity -> DTO
 # ============================================================
@@ -243,6 +259,13 @@ def _ticket_analysis_dto(e: TicketAnalysisEntity) -> TicketAnalysisDTO:
         latitude=e.latitude,
         longitude=e.longitude,
         formatted_address=e.formatted_address,
+    )
+
+
+def _ticket_assignment_dto(e: TicketAssignmentEntity) -> TicketAssignmentDTO:
+    return TicketAssignmentDTO(
+        ticket_id=e.ticket_id,
+        manager_id=e.manager_id,
     )
 
 
@@ -895,6 +918,138 @@ async def delete_ticket_analysis(
     except Exception as e:
         logger.exception("Error deleting ticket analysis: %s", e)
         raise HTTPException(status_code=500, detail="Failed to delete ticket analysis") from e
+
+
+# ============================================================
+# TICKET ASSIGNMENT CRUD
+# ============================================================
+
+@ticket_router.post("/assignments", response_model=TicketAssignmentDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def create_ticket_assignment(
+    repository_container: RepositoryContainer,
+    payload: TicketAssignmentCreateDTO,
+):
+    try:
+        repo = repository_container.ticket_assignment_repo_
+        entity = await repo.create(TicketAssignmentEntity(**payload.model_dump()))
+        return _ticket_assignment_dto(entity)
+    except Exception as e:
+        logger.exception("Error creating ticket assignment: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create ticket assignment") from e
+
+
+@ticket_router.get("/assignments/{ticket_id}/{manager_id}", response_model=TicketAssignmentDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def get_ticket_assignment(
+    repository_container: RepositoryContainer,
+    ticket_id: UUID,
+    manager_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.ticket_assignment_repo_
+        entity = await repo.get({"ticket_id": ticket_id, "manager_id": manager_id})
+        if not entity:
+            raise HTTPException(status_code=404, detail="Ticket assignment not found")
+        return _ticket_assignment_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting ticket assignment: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to get ticket assignment") from e
+
+
+@ticket_router.get("/assignments", response_model=List[TicketAssignmentDTO])
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def list_ticket_assignments(
+    repository_container: RepositoryContainer,
+    ticket_id: Optional[UUID] = Query(None),
+    manager_id: Optional[int] = Query(None, gt=0),
+):
+    try:
+        entities = await repository_container.ticket_assignment_repo_.get_all()
+
+        if ticket_id is not None:
+            entities = [x for x in entities if x.ticket_id == ticket_id]
+        if manager_id is not None:
+            entities = [x for x in entities if x.manager_id == manager_id]
+
+        return [_ticket_assignment_dto(x) for x in entities]
+    except Exception as e:
+        logger.exception("Error listing ticket assignments: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list ticket assignments") from e
+
+
+@ticket_router.put("/assignments/{ticket_id}/{manager_id}", response_model=TicketAssignmentDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def update_ticket_assignment(
+    repository_container: RepositoryContainer,
+    payload: TicketAssignmentUpdateDTO,
+    ticket_id: UUID,
+    manager_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.ticket_assignment_repo_
+        current_pk = {"ticket_id": ticket_id, "manager_id": manager_id}
+
+        existing = await repo.get(current_pk)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Ticket assignment not found")
+
+        next_ticket_id = payload.ticket_id if payload.ticket_id is not None else existing.ticket_id
+        next_manager_id = payload.manager_id if payload.manager_id is not None else existing.manager_id
+        next_pk = {"ticket_id": next_ticket_id, "manager_id": next_manager_id}
+
+        if next_pk == current_pk:
+            return _ticket_assignment_dto(existing)
+
+        conflict = await repo.get(next_pk)
+        if conflict:
+            raise HTTPException(status_code=409, detail="Ticket assignment already exists")
+
+        created = await repo.create(
+            TicketAssignmentEntity(
+                ticket_id=next_ticket_id,
+                manager_id=next_manager_id,
+            )
+        )
+        deleted = await repo.delete(current_pk)
+        if not deleted:
+            await repo.delete(next_pk)
+            raise HTTPException(status_code=500, detail="Failed to update ticket assignment")
+
+        return _ticket_assignment_dto(created)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating ticket assignment: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update ticket assignment") from e
+
+
+@ticket_router.delete("/assignments/{ticket_id}/{manager_id}", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def delete_ticket_assignment(
+    repository_container: RepositoryContainer,
+    ticket_id: UUID,
+    manager_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.ticket_assignment_repo_
+        pk = {"ticket_id": ticket_id, "manager_id": manager_id}
+        existing = await repo.get(pk)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Ticket assignment not found")
+
+        ok = await repo.delete(pk)
+        if not ok:
+            raise HTTPException(status_code=500, detail="Failed to delete ticket assignment")
+
+        return {"deleted": True, "ticket_id": str(ticket_id), "manager_id": manager_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting ticket assignment: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to delete ticket assignment") from e
 
 
 # ============================================================

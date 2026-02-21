@@ -74,4 +74,5 @@ Pipfile.lock
 *.local
 
 Tests/
+# LangGraph runtime state
 backend/.langgraph_api/

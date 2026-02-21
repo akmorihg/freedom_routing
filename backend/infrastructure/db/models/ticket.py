@@ -39,3 +39,10 @@ class TicketAnalysis(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     formatted_address = Column(String, nullable=False, default="")
+
+
+class TicketAssignment(Base):
+    __tablename__ = "ticket_assignments"
+
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), primary_key=True)
+    manager_id = Column(Integer, ForeignKey("managers.id"), primary_key=True)

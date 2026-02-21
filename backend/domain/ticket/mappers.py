@@ -5,10 +5,18 @@ from backend.domain.ticket.entities import (
     TicketEntity,
     TicketAnalysisEntity,
     TicketAttachmentEntity,
+    TicketAssignmentEntity,
     GenderEntity,
     ClientSegmentEntity,
 )
-from backend.infrastructure.db.models import Ticket, TicketAnalysis, TickerAttachments, Gender, ClientSegment
+from backend.infrastructure.db.models import (
+    Ticket,
+    TicketAnalysis,
+    TickerAttachments,
+    TicketAssignment,
+    Gender,
+    ClientSegment,
+)
 from backend.infrastructure.db.models.attachment import AttachmentType, Attachment
 
 
@@ -170,4 +178,23 @@ class TicketAttachmentMapper(BaseMapper[TickerAttachments, TicketAttachmentEntit
         return TickerAttachments(
             ticket_id=entity.ticket_id,
             attachment_id=entity.attachment_id,
+        )
+
+
+class TicketAssignmentMapper(BaseMapper[TicketAssignment, TicketAssignmentEntity]):
+    model = TicketAssignment
+    entity = TicketAssignmentEntity
+
+    @classmethod
+    def to_entity(cls, model: TicketAssignment, lazy: bool = False) -> TicketAssignmentEntity:
+        return TicketAssignmentEntity(
+            ticket_id=model.ticket_id,
+            manager_id=model.manager_id,
+        )
+
+    @classmethod
+    def to_model(cls, entity: TicketAssignmentEntity, lazy: bool = False) -> TicketAssignment:
+        return TicketAssignment(
+            ticket_id=entity.ticket_id,
+            manager_id=entity.manager_id,
         )

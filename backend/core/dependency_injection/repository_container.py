@@ -15,6 +15,7 @@ from backend.application.repos.abstract.ticket.gender import AbstractGenderRepos
 from backend.application.repos.abstract.ticket.ticket import AbstractTicketRepository
 from backend.application.repos.abstract.ticket.ticket_analysis import AbstractTicketAnalysisRepository
 from backend.application.repos.abstract.ticket.ticket_attachment import AbstractTicketAttachmentRepository
+from backend.application.repos.abstract.ticket.ticket_assignment import AbstractTicketAssignmentRepository
 from backend.application.repos.sqlalchemy.location.address import SqlAlchemyAddressRepository
 from backend.application.repos.sqlalchemy.location.city import SqlAlchemyCityRepository
 from backend.application.repos.sqlalchemy.location.country import SqlAlchemyCountryRepository
@@ -32,6 +33,7 @@ from backend.application.repos.sqlalchemy.ticket.gender import SqlAlchemyGenderR
 from backend.application.repos.sqlalchemy.ticket.ticket import SqlAlchemyTicketRepository
 from backend.application.repos.sqlalchemy.ticket.ticket_analysis import SqlAlchemyTicketAnalysisRepository
 from backend.application.repos.sqlalchemy.ticket.ticket_attachment import SqlAlchemyTicketAttachmentRepository
+from backend.application.repos.sqlalchemy.ticket.ticket_assignment import SqlAlchemyTicketAssignmentRepository
 from backend.core.dependency_injection.db_container import DBContainer
 from typing import Dict, Any, List
 
@@ -158,6 +160,15 @@ class RepositoryContainer:
     @property
     def ticket_attachment_repo_(self) -> AbstractTicketAttachmentRepository:
         return SqlAlchemyTicketAttachmentRepository(
+            session=self._internal_session(),
+            is_transactional=self.is_transactional,
+            use_cache=True,
+            cache_manager=self.global_vars_map["cache_manager"],
+        )
+
+    @property
+    def ticket_assignment_repo_(self) -> AbstractTicketAssignmentRepository:
+        return SqlAlchemyTicketAssignmentRepository(
             session=self._internal_session(),
             is_transactional=self.is_transactional,
             use_cache=True,

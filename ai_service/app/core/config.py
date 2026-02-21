@@ -28,6 +28,9 @@ class Settings:
     task_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("TASK_TIMEOUT_SECONDS", "5.0"))
     )
+    image_task_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("IMAGE_TASK_TIMEOUT_SECONDS", "45.0"))
+    )
     max_retries: int = field(
         default_factory=lambda: int(os.getenv("MAX_RETRIES", "2"))
     )

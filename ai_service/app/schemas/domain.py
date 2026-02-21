@@ -99,7 +99,83 @@ class TicketAnalysisResult(BaseModel):
     formatted_address: str = Field(default="")
     geo_status: str = Field(default="skipped", description="skipped | ok | fallback | error")
 
-    # ── Routing (filled later by RoutingService) ─────────────────────────
-    assigned_manager: str | None = Field(default=None, description="Manager name after routing")
-    assigned_office: str | None = Field(default=None, description="Office city after routing")
-    routing_status: str = Field(default="pending", description="pending | routed | failed")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Ticket Assignment  (separate table — FK to ticket_analysis.ticket_id)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TicketAssignment(BaseModel):
+    """Routing decision for a single ticket — filled by RoutingService.
+
+    Separate table from ``ticket_analysis`` with a 1-to-1 FK on
+    ``ticket_id``.  Captures *which* manager was assigned, *why*,
+    and the cascade of filters that led to the decision.
+
+    Suggested DB table name: ``ticket_assignment``
+
+    Routing cascade (§3.2 Business Rules)
+    ──────────────────────────────────────
+    1. **Geo filter** — find nearest office to client coordinates.
+       Exception: unknown address / foreign → 50/50 Астана / Алматы.
+    2. **Competency filter (hard skills)**
+       • VIP / Priority segment → manager must have ``VIP`` skill.
+       • Request type ``Смена данных`` → manager must be ``Главный специалист``.
+       • Language KZ / ENG → manager must have matching skill tag.
+    3. **Load balancing (Round Robin)**
+       Within the target office, pick the 2 eligible managers with the
+       lowest ``current_load`` and assign tickets round-robin.
+    """
+
+    # ── Identity ─────────────────────────────────────────────────────────
+    ticket_id: str = Field(..., description="FK → ticket_analysis.ticket_id")
+
+    # ── Assignment result ────────────────────────────────────────────────
+    assigned_manager: str | None = Field(
+        default=None, description="Manager name who received the ticket",
+    )
+    assigned_office: str | None = Field(
+        default=None, description="Office city the manager belongs to",
+    )
+    routing_status: str = Field(
+        default="pending",
+        description="pending | routed | failed",
+    )
+
+    # ── Filter trace (explains *why* this manager) ───────────────────────
+    #    Stored so decisions are auditable / debuggable.
+
+    # Step 1 — Geo
+    nearest_office: str | None = Field(
+        default=None,
+        description="Office returned by geo filter (before competency check)",
+    )
+    geo_fallback: bool = Field(
+        default=False,
+        description="True when address unknown / foreign → Астана/Алматы split",
+    )
+
+    # Step 2 — Competency
+    required_skills: list[str] = Field(
+        default_factory=list,
+        description="Skills the manager must have for this ticket (e.g. ['VIP', 'KZ'])",
+    )
+    required_position: str | None = Field(
+        default=None,
+        description="Required position level (e.g. 'Главный специалист' for data-change requests)",
+    )
+    eligible_manager_count: int = Field(
+        default=0,
+        description="How many managers passed all filters in the target office",
+    )
+
+    # Step 3 — Load balancing
+    assigned_manager_load: int | None = Field(
+        default=None,
+        description="Manager's current_load at time of assignment",
+    )
+    round_robin_index: int | None = Field(
+        default=None,
+        description="0-based index in the round-robin pair for this office",
+    )
+

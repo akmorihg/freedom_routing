@@ -92,7 +92,7 @@ class AnalysisOrchestrator:
                 self._llm,
                 attachments,
                 max_retries=self._settings.max_retries,
-                timeout=self._settings.task_timeout_seconds + 3.0,
+                timeout=self._settings.image_task_timeout_seconds,
                 base_delay=self._settings.retry_base_delay,
             )
             img_lat = (time.perf_counter() - img_t0) * 1000
@@ -116,8 +116,10 @@ class AnalysisOrchestrator:
         if not description.strip():
             description = "Обращение клиента без текста и без вложений."
 
-        # Image URLs for multimodal LLM tasks
-        task_images = attachments if attachments else None
+        # Only forward raw images to Phase 1 tasks when image enrichment
+        # failed — if enrichment succeeded the description already carries
+        # the image context as text, saving bandwidth and latency.
+        task_images = attachments if (attachments and not image_enriched) else None
 
         # -- Phase 1: launch all tasks concurrently ----------------------------
         (

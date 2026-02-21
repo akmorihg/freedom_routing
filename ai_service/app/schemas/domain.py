@@ -134,14 +134,6 @@ class TicketAssignment(BaseModel):
     assigned_manager: str | None = Field(
         default=None, description="Manager name who received the ticket",
     )
-    assigned_office: str | None = Field(
-        default=None, description="Office city the manager belongs to",
-    )
-    routing_status: str = Field(
-        default="pending",
-        description="pending | routed | failed",
-    )
-
     # ── Filter trace (explains *why* this manager) ───────────────────────
     #    Stored so decisions are auditable / debuggable.
 

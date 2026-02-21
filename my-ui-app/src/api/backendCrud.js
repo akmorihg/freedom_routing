@@ -1,11 +1,10 @@
-const DEFAULT_BACKEND_HOST = "http://192.168.0.151:8000";
+const DEFAULT_BACKEND_HOST = "/api";
 
 const getBackendCandidates = () => {
   const candidates = [
     process.env.REACT_APP_BACKEND_API_URL,
     process.env.REACT_APP_API_URL,
     DEFAULT_BACKEND_HOST,
-    "http://192.168.0.151:8000"
   ];
 
   return [...new Set(candidates.filter(Boolean))];
@@ -267,3 +266,38 @@ export const createCity = (payload) => request("/location/cities", { method: "PO
 export const listAddresses = (params = {}) => request(`/location/addresses${buildQuery(params)}`);
 export const createAddress = (payload) =>
   request("/location/addresses", { method: "POST", body: payload });
+
+// Ticket Assignments
+export const listTicketAssignments = () => request("/tickets/assignments");
+
+// Ticket Analysis (separate from tickets)
+export const listTicketAnalyses = () => request("/tickets/analysis");
+
+// AI Service helpers (called via /ai proxy)
+const AI_BASE = process.env.REACT_APP_AI_API_URL || "/ai";
+
+const aiRequest = async (path, method = "POST") => {
+  const url = `${AI_BASE}${path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 300000); // 5 min timeout for long-running AI ops
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.detail || `AI request failed: ${response.status}`);
+    }
+    return data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err?.name === "AbortError") throw new Error(`AI request timed out (${url})`);
+    throw err;
+  }
+};
+
+export const triggerAnalyzeFromDb = () => aiRequest("/ai/analyze-from-db");
+export const triggerRoutingFromDb = () => aiRequest("/routing/assign-from-db");

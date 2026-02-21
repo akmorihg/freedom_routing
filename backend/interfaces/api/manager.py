@@ -143,15 +143,12 @@ async def _fill_manager_relations(
     if expand_city and dto.city_id:
         city = await repository_container.city_repo_.get(dto.city_id)
         if city:
-            # assuming your CityDTO is (id_, name, region_id, region optional)
             dto.city = CityDTO(id_=int(city.id_), name=city.name, region_id=city.region_id)
 
     if expand_skills:
         links = await repository_container.manager_skill_repo_.search(
             filters=[repository_container.manager_skill_repo_.primary_keys["manager_id"] == dto.id_]
         )
-        # NOTE: above line depends on how your ManagerSkillRepo exposes model columns.
-        # Safer fallback: get_all then filter in python (less efficient but works everywhere).
         if links is None:
             links = []
 
@@ -163,17 +160,71 @@ async def _fill_manager_relations(
         dto.skills = skills
 
 
+async def _fill_managers_relations_batch(
+    repository_container: RepositoryContainer,
+    dtos: List[ManagerDTO],
+    *,
+    expand_position: bool,
+    expand_city: bool,
+    expand_skills: bool,
+) -> None:
+    """Batch-fill relations for a list of managers in O(1) bulk queries
+    instead of O(n) per-manager queries.  Scales to thousands of managers."""
+    if not dtos:
+        return
+
+    # 1. Positions lookup
+    if expand_position:
+        all_positions = await repository_container.manager_position_repo_.get_all()
+        pos_map = {int(p.id_): p for p in all_positions}
+        for dto in dtos:
+            if dto.position_id:
+                pos = pos_map.get(dto.position_id)
+                dto.position = _position_dto(pos) if pos else None
+
+    # 2. Cities lookup
+    if expand_city:
+        all_cities = await repository_container.city_repo_.get_all()
+        city_map = {int(c.id_): c for c in all_cities}
+        for dto in dtos:
+            if dto.city_id:
+                city = city_map.get(dto.city_id)
+                if city:
+                    dto.city = CityDTO(id_=int(city.id_), name=city.name, region_id=city.region_id)
+
+    # 3. Skills: bulk-load all links + all skills, then fan-out in Python
+    if expand_skills:
+        all_links = await repository_container.manager_skill_repo_.get_all()
+        all_skills = await repository_container.skill_repo_.get_all()
+        skill_map = {int(s.id_): s for s in all_skills}
+
+        # group links by manager_id
+        from collections import defaultdict
+        links_by_mgr: dict[int, list] = defaultdict(list)
+        for link in all_links:
+            links_by_mgr[link.manager_id].append(link.skill_id)
+
+        for dto in dtos:
+            dto.skills = [
+                _skill_dto(skill_map[sid])
+                for sid in links_by_mgr.get(dto.id_, [])
+                if sid in skill_map
+            ]
+
+
 async def _load_manager_skill_links(
     repository_container: RepositoryContainer,
     manager_id: int,
 ) -> List[ManagerSkillEntity]:
-    # Generic way that works with your BaseSQLAlchemyRepo API:
-    # It doesn't support list-by-filter directly, so use get_all + python filter,
-    # OR use search() if your concrete repo provides model columns / filters.
-
-    # ✅ Guaranteed to work (but not optimal):
-    all_links = await repository_container.manager_skill_repo_.get_all()
-    return [x for x in all_links if x.manager_id == manager_id]
+    """Load skill links for a single manager using an indexed filter."""
+    try:
+        return await repository_container.manager_skill_repo_.search(
+            filters=[repository_container.manager_skill_repo_.primary_keys["manager_id"] == manager_id]
+        )
+    except Exception:
+        # Fallback if search filter doesn't work on composite key
+        all_links = await repository_container.manager_skill_repo_.get_all()
+        return [x for x in all_links if x.manager_id == manager_id]
 
 
 async def _replace_manager_skills(
@@ -464,14 +515,13 @@ async def list_managers(
         dtos = [_manager_dto(x) for x in entities]
 
         if expand_position or expand_city or expand_skills:
-            for dto in dtos:
-                await _fill_manager_relations(
-                    repository_container,
-                    dto,
-                    expand_position=expand_position,
-                    expand_city=expand_city,
-                    expand_skills=expand_skills,
-                )
+            await _fill_managers_relations_batch(
+                repository_container,
+                dtos,
+                expand_position=expand_position,
+                expand_city=expand_city,
+                expand_skills=expand_skills,
+            )
 
         return dtos
     except Exception as e:
@@ -548,3 +598,26 @@ async def delete_manager(
     except Exception as e:
         logger.exception("Error deleting manager: %s", e)
         raise HTTPException(status_code=500, detail="Failed to delete manager") from e
+
+
+@manager_router.post("/truncate-all", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def truncate_all_manager_data(
+    repository_container: RepositoryContainer,
+):
+    """Truncate manager_skills, managers, skills, manager_positions tables.
+
+    Useful to clear duplicate data before re-uploading CSVs.
+    """
+    try:
+        from sqlalchemy import text
+
+        session = repository_container._cached_internal_session
+        await session.execute(text(
+            "TRUNCATE ticket_assignments, manager_skills, managers, skills, manager_positions CASCADE"
+        ))
+        await session.commit()
+        return {"truncated": True, "tables": ["ticket_assignments", "manager_skills", "managers", "skills", "manager_positions"]}
+    except Exception as e:
+        logger.exception("Error truncating manager tables: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to truncate manager tables") from e

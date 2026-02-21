@@ -242,36 +242,20 @@ class BackendClient:
     async def get_managers_expanded(self) -> list[dict]:
         """Fetch all managers with position, city, and skills expanded.
 
-        Uses individual per-manager requests to avoid backend
-        connection-pool exhaustion on the bulk list endpoint.
+        Uses the bulk list endpoint with expand flags — the backend now
+        handles batch relation fetching in O(1) bulk queries.
         """
-        # 1. Plain manager list (no expansion – very fast)
-        plain = await self.get_managers()
-
-        # 2. Bulk-fetch positions and build lookup
-        positions = await self.get_positions()
-        pos_map: dict[int, dict] = {p["id_"]: p for p in positions}
-
-        # 3. Bulk-fetch skills and build lookup
-        skills_list = await self.get_skills()
-        skill_map: dict[int, dict] = {s["id_"]: s for s in skills_list}
-
-        # 4. Get each manager individually to resolve skills
-        #    (default expand_skills=True on single-get)
-        enriched: list[dict] = []
-        for m in plain:
-            mid = m["id_"]
-            try:
-                detail = await self._get(f"/managers/{mid}")
-                mgr_skills = detail.get("skills") or []
-            except Exception:
-                mgr_skills = []
-
-            m["position"] = pos_map.get(m.get("position_id"))
-            m["skills"] = mgr_skills
-            enriched.append(m)
-
-        return enriched
+        items = await self._get(
+            "/managers",
+            params={
+                "expand_position": "true",
+                "expand_city": "true",
+                "expand_skills": "true",
+            },
+        )
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
 
     async def get_positions(self) -> list[dict]:
         """Return all manager positions."""

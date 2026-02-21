@@ -18,9 +18,9 @@ class SmartWRRRouter:
         }
 
     # Ticket priority calculation
-    def calculate_ticket_weight(self, urgency_score, client_segment):
+    def calculate_ticket_weight(self, urgency_score, client_segment, attachment):
         seg_weight = self.segment_weight.get(client_segment, 0)
-        return urgency_score + seg_weight
+        return urgency_score + seg_weight + attachment
 
     # Filter managers
     def filter_managers(self, ticket):
@@ -57,6 +57,7 @@ class SmartWRRRouter:
 
         urgency_score = ticket["urgency_score"]
         client_segment = ticket["client_segment"]
+        attachment = ticket["attachment"]
 
         # filter managers
         pool = self.filter_managers(ticket)
@@ -76,7 +77,7 @@ class SmartWRRRouter:
                 selected = top_candidates[0]
 
         # calculate ticket weight
-        ticket_weight = self.calculate_ticket_weight(urgency_score, client_segment)
+        ticket_weight = self.calculate_ticket_weight(urgency_score, client_segment, attachment)
 
         # update manager load
         selected["current_load"] += ticket_weight

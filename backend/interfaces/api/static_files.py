@@ -65,16 +65,17 @@ async def get_static_file(
 
         # We fetch bytes via repo.get() and stream them.
         # If you want true streaming for huge files, we can add repo.get_stream().
-        data: bytes = await repo.get(bucket=bucket, key=key)
+        url: str = await repo.get(bucket=bucket, key=key)
 
         filename = download_name or key.split("/")[-1] or "file"
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
 
-        return StreamingResponse(
-            iter([data]),
-            media_type="application/octet-stream",
-            headers=headers,
-        )
+        # return StreamingResponse(
+        #     iter([data]),
+        #     media_type="application/octet-stream",
+        #     headers=headers,
+        # )
+        return {"url": url}
     except HTTPException:
         raise
     except Exception as e:

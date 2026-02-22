@@ -5,8 +5,10 @@ import {
   Typography,
   Button,
   Card,
+  CardContent,
   Chip,
   CircularProgress,
+  Divider,
   LinearProgress,
   Table,
   TableBody,
@@ -283,6 +285,32 @@ const DashboardPage = ({ onBack }) => {
     city: office.city?.name || office.city_id || "-",
     address: office.address || "-",
   }));
+
+  // Build summary rows from analyses joined with tickets
+  const summaryRows = analyses
+    .filter((a) => a.summary && a.summary !== "-")
+    .map((a) => {
+      const ticket = tickets.find((t) => String(t.id_) === String(a.ticket_id)) || {};
+      const assign = assignmentMap[a.ticket_id];
+      const manager = assign ? managers.find((m) => m.id_ === assign.manager_id) : null;
+      return {
+        ticketId: a.ticket_id,
+        summary: a.summary,
+        requestType: a.request_type || "-",
+        sentiment: a.sentiment || "-",
+        urgency: a.urgency_score || "-",
+        language: a.language || "-",
+        segment: ticket.segment?.name || "-",
+        description: (ticket.description || "").slice(0, 120),
+        assignedManager: manager ? `Manager #${manager.id_} (${manager.city?.name || "?"})` : "Unassigned",
+        geo: a.formatted_address || a.geo?.formatted_address || "",
+      };
+    })
+    .sort((a, b) => {
+      const aU = a.urgency === "-" ? 0 : parseInt(a.urgency, 10) || 0;
+      const bU = b.urgency === "-" ? 0 : parseInt(b.urgency, 10) || 0;
+      return bU - aU;
+    });
 
   return (
     <Box
@@ -669,6 +697,118 @@ const DashboardPage = ({ onBack }) => {
             </>
           )}
 
+          {view === "summaries" && (
+            <>
+              <Typography variant="h4" gutterBottom sx={{ fontWeight: 800, color: "#0f172a" }}>
+                AI Summaries & Recommendations
+              </Typography>
+              {summaryRows.length === 0 ? (
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  No AI summaries available yet. Click "Run AI Analysis" to generate them.
+                </Alert>
+              ) : (
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+                  {summaryRows.map((row) => (
+                    <Card
+                      key={row.ticketId}
+                      sx={{
+                        borderRadius: 3,
+                        boxShadow: "0 6px 20px rgba(15, 23, 42, 0.10)",
+                        background: "linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(241,245,249,0.95) 100%)",
+                        border: "1px solid rgba(148, 163, 184, 0.22)",
+                        transition: "box-shadow 200ms ease, transform 200ms ease",
+                        "&:hover": {
+                          boxShadow: "0 12px 32px rgba(15, 23, 42, 0.16)",
+                          transform: "translateY(-2px)",
+                        },
+                      }}
+                    >
+                      <CardContent sx={{ p: 2.5 }}>
+                        {/* Header row */}
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 1.5, flexWrap: "wrap" }}>
+                          <Chip
+                            label={`Ticket #${row.ticketId}`}
+                            size="small"
+                            sx={{ bgcolor: "#1e293b", color: "#fff", fontWeight: 700, "& .MuiChip-label": { color: "#fff" } }}
+                          />
+                          <UrgencyChip value={row.urgency} />
+                          <SentimentChip value={row.sentiment} />
+                          <Chip
+                            label={row.requestType}
+                            size="small"
+                            variant="outlined"
+                            sx={{ fontWeight: 600, borderColor: "#93c5fd", color: "#1d4ed8" }}
+                          />
+                          <Chip
+                            label={row.language}
+                            size="small"
+                            variant="outlined"
+                            sx={{ fontWeight: 600, borderColor: "#c4b5fd", color: "#7c3aed" }}
+                          />
+                          {row.segment !== "-" && (
+                            <Chip
+                              label={row.segment}
+                              size="small"
+                              variant="outlined"
+                              sx={{ fontWeight: 600, borderColor: "#6ee7b7", color: "#059669" }}
+                            />
+                          )}
+                        </Box>
+
+                        {/* Original description (collapsed) */}
+                        {row.description && (
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              color: "#64748b",
+                              fontStyle: "italic",
+                              mb: 1.5,
+                              fontSize: "0.82rem",
+                              lineHeight: 1.5,
+                              maxHeight: 44,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            "{row.description}..."
+                          </Typography>
+                        )}
+
+                        <Divider sx={{ mb: 1.5, borderColor: "rgba(148,163,184,0.25)" }} />
+
+                        {/* AI Summary */}
+                        <Typography
+                          variant="body1"
+                          sx={{
+                            color: "#0f172a",
+                            fontWeight: 500,
+                            lineHeight: 1.7,
+                            fontSize: "0.95rem",
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {row.summary}
+                        </Typography>
+
+                        {/* Footer */}
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 2, mt: 1.5, flexWrap: "wrap" }}>
+                          <Typography variant="caption" sx={{ color: "#64748b", fontWeight: 600 }}>
+                            {row.assignedManager}
+                          </Typography>
+                          {row.geo && (
+                            <Typography variant="caption" sx={{ color: "#94a3b8" }}>
+                              {row.geo}
+                            </Typography>
+                          )}
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </Box>
+              )}
+            </>
+          )}
+
           {view === "assignments" && (
             <>
               <Typography variant="h4" gutterBottom sx={{ fontWeight: 800, color: "#0f172a" }}>
@@ -770,6 +910,15 @@ const DashboardPage = ({ onBack }) => {
             onClick={() => setView("tickets")}
           >
             Tickets
+          </Button>
+
+          <Button
+            fullWidth
+            sx={sidebarButtonSx(view === "summaries")}
+            variant={view === "summaries" ? "contained" : "outlined"}
+            onClick={() => setView("summaries")}
+          >
+            AI Summaries
           </Button>
 
           <Button

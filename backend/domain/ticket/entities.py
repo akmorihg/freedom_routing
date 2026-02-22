@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional, Union, Any, Dict
 from uuid import UUID
@@ -86,3 +86,38 @@ class TicketAssignmentEntity(BaseEntity):
             "ticket_id": self.ticket_id,
             "manager_id": self.manager_id,
         }
+
+
+@dataclass
+class TaskLatenciesEntity(BaseEntity):
+    id_: Optional[int] = None
+    request_type: float = 0.0
+    sentiment: float = 0.0
+    urgency_score: float = 0.0
+    language: float = 0.0
+    summary: float = 0.0
+    geo: float = 0.0
+    image_describe: float = 0.0
+
+
+@dataclass
+class RetriesUsedEntity(BaseEntity):
+    id_: Optional[int] = None
+    request_type: int = 0
+    sentiment: int = 0
+    urgency_score: int = 0
+    language: int = 0
+    summary: int = 0
+    geo: int = 0
+    image_describe: int = 0
+
+
+@dataclass
+class AnalysisMetaEntity(BaseEntity):
+    id_: Optional[int] = None
+    ticket_id: Optional[UUID] = None
+    model: str = ""
+    task_latencies_id: int = 0
+    retries_used_id: int = 0
+    fallbacks_used: list[str] = field(default_factory=list)
+    total_processing_ms: float = 0.0

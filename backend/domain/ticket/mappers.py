@@ -8,6 +8,9 @@ from backend.domain.ticket.entities import (
     TicketAssignmentEntity,
     GenderEntity,
     ClientSegmentEntity,
+    TaskLatenciesEntity,
+    RetriesUsedEntity,
+    AnalysisMetaEntity,
 )
 from backend.infrastructure.db.models import (
     Ticket,
@@ -16,6 +19,9 @@ from backend.infrastructure.db.models import (
     TicketAssignment,
     Gender,
     ClientSegment,
+    TaskLatencies,
+    RetriesUsed,
+    AnalysisMeta,
 )
 from backend.infrastructure.db.models.attachment import AttachmentType, Attachment
 
@@ -197,4 +203,95 @@ class TicketAssignmentMapper(BaseMapper[TicketAssignment, TicketAssignmentEntity
         return TicketAssignment(
             ticket_id=entity.ticket_id,
             manager_id=entity.manager_id,
+        )
+
+
+class TaskLatenciesMapper(BaseMapper[TaskLatencies, TaskLatenciesEntity]):
+    model = TaskLatencies
+    entity = TaskLatenciesEntity
+
+    @classmethod
+    def to_entity(cls, model: TaskLatencies, lazy: bool = False) -> TaskLatenciesEntity:
+        return TaskLatenciesEntity(
+            id_=model.id,
+            request_type=model.request_type,
+            sentiment=model.sentiment,
+            urgency_score=model.urgency_score,
+            language=model.language,
+            summary=model.summary,
+            geo=model.geo,
+            image_describe=model.image_describe,
+        )
+
+    @classmethod
+    def to_model(cls, entity: TaskLatenciesEntity, lazy: bool = False) -> TaskLatencies:
+        return TaskLatencies(
+            id=entity.id_,
+            request_type=entity.request_type,
+            sentiment=entity.sentiment,
+            urgency_score=entity.urgency_score,
+            language=entity.language,
+            summary=entity.summary,
+            geo=entity.geo,
+            image_describe=entity.image_describe,
+        )
+
+
+class RetriesUsedMapper(BaseMapper[RetriesUsed, RetriesUsedEntity]):
+    model = RetriesUsed
+    entity = RetriesUsedEntity
+
+    @classmethod
+    def to_entity(cls, model: RetriesUsed, lazy: bool = False) -> RetriesUsedEntity:
+        return RetriesUsedEntity(
+            id_=model.id,
+            request_type=model.request_type,
+            sentiment=model.sentiment,
+            urgency_score=model.urgency_score,
+            language=model.language,
+            summary=model.summary,
+            geo=model.geo,
+            image_describe=model.image_describe,
+        )
+
+    @classmethod
+    def to_model(cls, entity: RetriesUsedEntity, lazy: bool = False) -> RetriesUsed:
+        return RetriesUsed(
+            id=entity.id_,
+            request_type=entity.request_type,
+            sentiment=entity.sentiment,
+            urgency_score=entity.urgency_score,
+            language=entity.language,
+            summary=entity.summary,
+            geo=entity.geo,
+            image_describe=entity.image_describe,
+        )
+
+
+class AnalysisMetaMapper(BaseMapper[AnalysisMeta, AnalysisMetaEntity]):
+    model = AnalysisMeta
+    entity = AnalysisMetaEntity
+
+    @classmethod
+    def to_entity(cls, model: AnalysisMeta, lazy: bool = False) -> AnalysisMetaEntity:
+        return AnalysisMetaEntity(
+            id_=model.id,
+            ticket_id=model.ticket_id,
+            model=model.model,
+            task_latencies_id=model.task_latencies_id,
+            retries_used_id=model.retries_used_id,
+            fallbacks_used=model.fallbacks_used or [],
+            total_processing_ms=model.total_processing_ms,
+        )
+
+    @classmethod
+    def to_model(cls, entity: AnalysisMetaEntity, lazy: bool = False) -> AnalysisMeta:
+        return AnalysisMeta(
+            id=entity.id_,
+            ticket_id=entity.ticket_id,
+            model=entity.model,
+            task_latencies_id=entity.task_latencies_id,
+            retries_used_id=entity.retries_used_id,
+            fallbacks_used=entity.fallbacks_used,
+            total_processing_ms=entity.total_processing_ms,
         )

@@ -22,6 +22,9 @@ from backend.domain.ticket.entities import (
     TicketAnalysisEntity,
     TicketAttachmentEntity,
     TicketAssignmentEntity,
+    TaskLatenciesEntity,
+    RetriesUsedEntity,
+    AnalysisMetaEntity,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +94,41 @@ class TicketAnalysisDTO(BaseModel):
 class TicketAssignmentDTO(BaseModel):
     ticket_id: UUID
     manager_id: int
+
+
+class TaskLatenciesDTO(BaseModel):
+    id_: int
+    request_type: float = 0.0
+    sentiment: float = 0.0
+    urgency_score: float = 0.0
+    language: float = 0.0
+    summary: float = 0.0
+    geo: float = 0.0
+    image_describe: float = 0.0
+
+
+class RetriesUsedDTO(BaseModel):
+    id_: int
+    request_type: int = 0
+    sentiment: int = 0
+    urgency_score: int = 0
+    language: int = 0
+    summary: int = 0
+    geo: int = 0
+    image_describe: int = 0
+
+
+class AnalysisMetaDTO(BaseModel):
+    id_: int
+    ticket_id: UUID
+    model: str
+    task_latencies_id: int
+    retries_used_id: int
+    fallbacks_used: List[str] = Field(default_factory=list)
+    total_processing_ms: float = 0.0
+
+    task_latencies: Optional[TaskLatenciesDTO] = None
+    retries_used: Optional[RetriesUsedDTO] = None
 
 
 # ============================================================
@@ -199,6 +237,64 @@ class TicketAssignmentUpdateDTO(BaseModel):
     manager_id: Optional[int] = Field(None, gt=0)
 
 
+class TaskLatenciesCreateDTO(BaseModel):
+    request_type: float = Field(0.0, ge=0.0)
+    sentiment: float = Field(0.0, ge=0.0)
+    urgency_score: float = Field(0.0, ge=0.0)
+    language: float = Field(0.0, ge=0.0)
+    summary: float = Field(0.0, ge=0.0)
+    geo: float = Field(0.0, ge=0.0)
+    image_describe: float = Field(0.0, ge=0.0)
+
+
+class TaskLatenciesUpdateDTO(BaseModel):
+    request_type: Optional[float] = Field(None, ge=0.0)
+    sentiment: Optional[float] = Field(None, ge=0.0)
+    urgency_score: Optional[float] = Field(None, ge=0.0)
+    language: Optional[float] = Field(None, ge=0.0)
+    summary: Optional[float] = Field(None, ge=0.0)
+    geo: Optional[float] = Field(None, ge=0.0)
+    image_describe: Optional[float] = Field(None, ge=0.0)
+
+
+class RetriesUsedCreateDTO(BaseModel):
+    request_type: int = Field(0, ge=0)
+    sentiment: int = Field(0, ge=0)
+    urgency_score: int = Field(0, ge=0)
+    language: int = Field(0, ge=0)
+    summary: int = Field(0, ge=0)
+    geo: int = Field(0, ge=0)
+    image_describe: int = Field(0, ge=0)
+
+
+class RetriesUsedUpdateDTO(BaseModel):
+    request_type: Optional[int] = Field(None, ge=0)
+    sentiment: Optional[int] = Field(None, ge=0)
+    urgency_score: Optional[int] = Field(None, ge=0)
+    language: Optional[int] = Field(None, ge=0)
+    summary: Optional[int] = Field(None, ge=0)
+    geo: Optional[int] = Field(None, ge=0)
+    image_describe: Optional[int] = Field(None, ge=0)
+
+
+class AnalysisMetaCreateDTO(BaseModel):
+    ticket_id: UUID
+    model: str = Field(..., min_length=1, max_length=255)
+    task_latencies_id: int = Field(..., gt=0)
+    retries_used_id: int = Field(..., gt=0)
+    fallbacks_used: List[str] = Field(default_factory=list)
+    total_processing_ms: float = Field(0.0, ge=0.0)
+
+
+class AnalysisMetaUpdateDTO(BaseModel):
+    ticket_id: Optional[UUID] = None
+    model: Optional[str] = Field(None, min_length=1, max_length=255)
+    task_latencies_id: Optional[int] = Field(None, gt=0)
+    retries_used_id: Optional[int] = Field(None, gt=0)
+    fallbacks_used: Optional[List[str]] = None
+    total_processing_ms: Optional[float] = Field(None, ge=0.0)
+
+
 # ============================================================
 # Helpers: dict/DTO -> Entity; Entity -> DTO
 # ============================================================
@@ -267,6 +363,58 @@ def _ticket_assignment_dto(e: TicketAssignmentEntity) -> TicketAssignmentDTO:
         ticket_id=e.ticket_id,
         manager_id=e.manager_id,
     )
+
+
+def _task_latencies_dto(e: TaskLatenciesEntity) -> TaskLatenciesDTO:
+    return TaskLatenciesDTO(
+        id_=int(e.id_),
+        request_type=e.request_type,
+        sentiment=e.sentiment,
+        urgency_score=e.urgency_score,
+        language=e.language,
+        summary=e.summary,
+        geo=e.geo,
+        image_describe=e.image_describe,
+    )
+
+
+def _retries_used_dto(e: RetriesUsedEntity) -> RetriesUsedDTO:
+    return RetriesUsedDTO(
+        id_=int(e.id_),
+        request_type=e.request_type,
+        sentiment=e.sentiment,
+        urgency_score=e.urgency_score,
+        language=e.language,
+        summary=e.summary,
+        geo=e.geo,
+        image_describe=e.image_describe,
+    )
+
+
+async def _analysis_meta_dto(
+    repository_container: RepositoryContainer,
+    e: AnalysisMetaEntity,
+    *,
+    expand: bool,
+) -> AnalysisMetaDTO:
+    dto = AnalysisMetaDTO(
+        id_=int(e.id_),
+        ticket_id=e.ticket_id,
+        model=e.model,
+        task_latencies_id=e.task_latencies_id,
+        retries_used_id=e.retries_used_id,
+        fallbacks_used=e.fallbacks_used or [],
+        total_processing_ms=e.total_processing_ms,
+    )
+
+    if expand:
+        lat = await repository_container.task_latencies_repo_.get(dto.task_latencies_id)
+        retries = await repository_container.retries_used_repo_.get(dto.retries_used_id)
+
+        dto.task_latencies = _task_latencies_dto(lat) if lat else None
+        dto.retries_used = _retries_used_dto(retries) if retries else None
+
+    return dto
 
 
 async def _load_ticket_attachment_links(
@@ -1050,6 +1198,339 @@ async def delete_ticket_assignment(
     except Exception as e:
         logger.exception("Error deleting ticket assignment: %s", e)
         raise HTTPException(status_code=500, detail="Failed to delete ticket assignment") from e
+
+
+# ============================================================
+# TASK LATENCIES CRUD
+# ============================================================
+
+@ticket_router.post("/task-latencies", response_model=TaskLatenciesDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def create_task_latencies(
+    repository_container: RepositoryContainer,
+    payload: TaskLatenciesCreateDTO,
+):
+    try:
+        repo = repository_container.task_latencies_repo_
+        entity = await repo.create(_to_entity(TaskLatenciesEntity, payload))
+        return _task_latencies_dto(entity)
+    except Exception as e:
+        logger.exception("Error creating task latencies: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create task latencies") from e
+
+
+@ticket_router.get("/task-latencies/{latencies_id}", response_model=TaskLatenciesDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def get_task_latencies(
+    repository_container: RepositoryContainer,
+    latencies_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.task_latencies_repo_
+        entity = await repo.get(latencies_id)
+        if not entity:
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+        return _task_latencies_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting task latencies: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to get task latencies") from e
+
+
+@ticket_router.get("/task-latencies", response_model=List[TaskLatenciesDTO])
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def list_task_latencies(
+    repository_container: RepositoryContainer,
+):
+    try:
+        entities = await repository_container.task_latencies_repo_.get_all()
+        return [_task_latencies_dto(x) for x in entities]
+    except Exception as e:
+        logger.exception("Error listing task latencies: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list task latencies") from e
+
+
+@ticket_router.put("/task-latencies/{latencies_id}", response_model=TaskLatenciesDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def update_task_latencies(
+    repository_container: RepositoryContainer,
+    payload: TaskLatenciesUpdateDTO,
+    latencies_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.task_latencies_repo_
+        existing = await repo.get(latencies_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+
+        entity = await repo.update(_to_entity(TaskLatenciesEntity, payload, id_=latencies_id))
+        if not entity:
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+        return _task_latencies_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating task latencies: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update task latencies") from e
+
+
+@ticket_router.delete("/task-latencies/{latencies_id}", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def delete_task_latencies(
+    repository_container: RepositoryContainer,
+    latencies_id: int = Path(..., gt=0),
+):
+    try:
+        ok = await repository_container.task_latencies_repo_.delete(latencies_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+        return {"deleted": True, "id_": latencies_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting task latencies: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to delete task latencies") from e
+
+
+# ============================================================
+# RETRIES USED CRUD
+# ============================================================
+
+@ticket_router.post("/retries-used", response_model=RetriesUsedDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def create_retries_used(
+    repository_container: RepositoryContainer,
+    payload: RetriesUsedCreateDTO,
+):
+    try:
+        repo = repository_container.retries_used_repo_
+        entity = await repo.create(_to_entity(RetriesUsedEntity, payload))
+        return _retries_used_dto(entity)
+    except Exception as e:
+        logger.exception("Error creating retries used: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create retries used") from e
+
+
+@ticket_router.get("/retries-used/{retries_id}", response_model=RetriesUsedDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def get_retries_used(
+    repository_container: RepositoryContainer,
+    retries_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.retries_used_repo_
+        entity = await repo.get(retries_id)
+        if not entity:
+            raise HTTPException(status_code=404, detail="Retries used not found")
+        return _retries_used_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting retries used: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to get retries used") from e
+
+
+@ticket_router.get("/retries-used", response_model=List[RetriesUsedDTO])
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def list_retries_used(
+    repository_container: RepositoryContainer,
+):
+    try:
+        entities = await repository_container.retries_used_repo_.get_all()
+        return [_retries_used_dto(x) for x in entities]
+    except Exception as e:
+        logger.exception("Error listing retries used: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list retries used") from e
+
+
+@ticket_router.put("/retries-used/{retries_id}", response_model=RetriesUsedDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def update_retries_used(
+    repository_container: RepositoryContainer,
+    payload: RetriesUsedUpdateDTO,
+    retries_id: int = Path(..., gt=0),
+):
+    try:
+        repo = repository_container.retries_used_repo_
+        existing = await repo.get(retries_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Retries used not found")
+
+        entity = await repo.update(_to_entity(RetriesUsedEntity, payload, id_=retries_id))
+        if not entity:
+            raise HTTPException(status_code=404, detail="Retries used not found")
+        return _retries_used_dto(entity)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating retries used: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update retries used") from e
+
+
+@ticket_router.delete("/retries-used/{retries_id}", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def delete_retries_used(
+    repository_container: RepositoryContainer,
+    retries_id: int = Path(..., gt=0),
+):
+    try:
+        ok = await repository_container.retries_used_repo_.delete(retries_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Retries used not found")
+        return {"deleted": True, "id_": retries_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting retries used: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to delete retries used") from e
+
+
+# ============================================================
+# ANALYSIS META CRUD
+# ============================================================
+
+@ticket_router.post("/analysis-meta", response_model=AnalysisMetaDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def create_analysis_meta(
+    repository_container: RepositoryContainer,
+    payload: AnalysisMetaCreateDTO,
+    expand: bool = Query(False),
+):
+    try:
+        if not await repository_container.ticket_repo_.get(payload.ticket_id):
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        if not await repository_container.task_latencies_repo_.get(payload.task_latencies_id):
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+        if not await repository_container.retries_used_repo_.get(payload.retries_used_id):
+            raise HTTPException(status_code=404, detail="Retries used not found")
+
+        repo = repository_container.analysis_meta_repo_
+        entity = await repo.create(_to_entity(AnalysisMetaEntity, payload))
+        return await _analysis_meta_dto(repository_container, entity, expand=expand)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error creating analysis meta: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create analysis meta") from e
+
+
+@ticket_router.get("/analysis-meta/{meta_id}", response_model=AnalysisMetaDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def get_analysis_meta(
+    repository_container: RepositoryContainer,
+    meta_id: int = Path(..., gt=0),
+    expand: bool = Query(False),
+):
+    try:
+        repo = repository_container.analysis_meta_repo_
+        entity = await repo.get(meta_id)
+        if not entity:
+            raise HTTPException(status_code=404, detail="Analysis meta not found")
+        return await _analysis_meta_dto(repository_container, entity, expand=expand)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting analysis meta: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to get analysis meta") from e
+
+
+@ticket_router.get("/analysis-meta", response_model=List[AnalysisMetaDTO])
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def list_analysis_meta(
+    repository_container: RepositoryContainer,
+    ticket_id: Optional[UUID] = Query(None),
+    task_latencies_id: Optional[int] = Query(None, gt=0),
+    retries_used_id: Optional[int] = Query(None, gt=0),
+    expand: bool = Query(False),
+):
+    try:
+        entities = await repository_container.analysis_meta_repo_.get_all()
+
+        if ticket_id is not None:
+            entities = [x for x in entities if x.ticket_id == ticket_id]
+        if task_latencies_id is not None:
+            entities = [x for x in entities if x.task_latencies_id == task_latencies_id]
+        if retries_used_id is not None:
+            entities = [x for x in entities if x.retries_used_id == retries_used_id]
+
+        return [
+            await _analysis_meta_dto(repository_container, x, expand=expand)
+            for x in entities
+        ]
+    except Exception as e:
+        logger.exception("Error listing analysis meta: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list analysis meta") from e
+
+
+@ticket_router.put("/analysis-meta/{meta_id}", response_model=AnalysisMetaDTO)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def update_analysis_meta(
+    repository_container: RepositoryContainer,
+    payload: AnalysisMetaUpdateDTO,
+    meta_id: int = Path(..., gt=0),
+    expand: bool = Query(False),
+):
+    try:
+        repo = repository_container.analysis_meta_repo_
+        existing = await repo.get(meta_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Analysis meta not found")
+
+        next_ticket_id = payload.ticket_id if payload.ticket_id is not None else existing.ticket_id
+        next_task_latencies_id = (
+            payload.task_latencies_id
+            if payload.task_latencies_id is not None
+            else existing.task_latencies_id
+        )
+        next_retries_used_id = (
+            payload.retries_used_id
+            if payload.retries_used_id is not None
+            else existing.retries_used_id
+        )
+
+        if not await repository_container.ticket_repo_.get(next_ticket_id):
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        if not await repository_container.task_latencies_repo_.get(next_task_latencies_id):
+            raise HTTPException(status_code=404, detail="Task latencies not found")
+        if not await repository_container.retries_used_repo_.get(next_retries_used_id):
+            raise HTTPException(status_code=404, detail="Retries used not found")
+
+        data = existing.to_dict()
+        data.update(payload.model_dump(exclude_unset=True))
+        data["id_"] = meta_id
+        data["ticket_id"] = next_ticket_id
+        data["task_latencies_id"] = next_task_latencies_id
+        data["retries_used_id"] = next_retries_used_id
+
+        updated = await repo.update(AnalysisMetaEntity(**data))
+        if not updated:
+            raise HTTPException(status_code=404, detail="Analysis meta not found")
+
+        return await _analysis_meta_dto(repository_container, updated, expand=expand)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating analysis meta: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update analysis meta") from e
+
+
+@ticket_router.delete("/analysis-meta/{meta_id}", response_model=dict)
+@app_container.inject(params=["session", "external_session", "global_external_session"])
+async def delete_analysis_meta(
+    repository_container: RepositoryContainer,
+    meta_id: int = Path(..., gt=0),
+):
+    try:
+        ok = await repository_container.analysis_meta_repo_.delete(meta_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Analysis meta not found")
+        return {"deleted": True, "id_": meta_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting analysis meta: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to delete analysis meta") from e
 
 
 # ============================================================

@@ -358,6 +358,7 @@ async def upload_tickets(
 
         created_tickets = 0
         db_errors: list[str] = []
+        att_type_cache: dict[str, int] = {}
 
         for ticket in result.tickets:
             try:
@@ -403,7 +404,7 @@ async def upload_tickets(
                 dob = _parse_dob(ticket.date_of_birth)
 
                 # Create ticket
-                await bc.create_ticket(
+                ticket_resp = await bc.create_ticket(
                     ticket_id=ticket.ticket_id,
                     gender_id=gender_id,
                     date_of_birth=dob,
@@ -411,7 +412,38 @@ async def upload_tickets(
                     segment_id=segment_id,
                     address_id=address_id,
                 )
+                created_ticket_id = ticket_resp.get("id_") or ticket.ticket_id
                 created_tickets += 1
+
+                # Handle attachments from CSV (Вложения column)
+                if ticket.attachments:
+                    att_ids: list[int] = []
+                    for fname in ticket.attachments:
+                        try:
+                            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                            mime_map = {
+                                "png": "image/png", "jpg": "image/jpeg",
+                                "jpeg": "image/jpeg", "gif": "image/gif",
+                                "webp": "image/webp", "pdf": "application/pdf",
+                            }
+                            mime = mime_map.get(ext, "application/octet-stream")
+                            type_id = await bc.find_or_create_attachment_type(
+                                mime, _cache=att_type_cache,
+                            )
+                            s3_key = f"tickets/{created_ticket_id}/{fname}"
+                            att = await bc.create_attachment(type_id, s3_key)
+                            att_ids.append(att["id_"])
+                        except Exception as att_err:
+                            db_errors.append(
+                                f"Attachment '{fname}' for ticket {created_ticket_id}: {att_err}"
+                            )
+                    if att_ids:
+                        try:
+                            await bc.link_attachments_to_ticket(created_ticket_id, att_ids)
+                        except Exception as link_err:
+                            db_errors.append(
+                                f"Linking attachments to ticket {created_ticket_id}: {link_err}"
+                            )
 
             except Exception as e:
                 db_errors.append(f"Ticket '{ticket.ticket_id}': {e}")

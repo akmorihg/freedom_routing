@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import time
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, status
 from fastapi.responses import JSONResponse
 
@@ -21,6 +25,39 @@ from app.services.result_store import save_result
 
 logger = get_logger("router.analysis")
 router = APIRouter(prefix="/ai", tags=["AI Analysis"])
+
+# ── Helper: convert presigned MinIO URLs → base64 data URIs ──────────
+
+
+def _rewrite_minio_url(url: str) -> str:
+    """Replace localhost/127.0.0.1 with Docker-internal hostname 'minio'."""
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1"):
+        return urlunparse(parsed._replace(netloc=f"minio:{parsed.port or 9000}"))
+    return url
+
+
+async def _download_image_as_data_uri(url: str, timeout: float = 15.0) -> str | None:
+    """Download image from MinIO and return a base64 data URI.
+
+    Returns None on any failure so the caller can skip gracefully.
+    """
+    internal_url = _rewrite_minio_url(url)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(internal_url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if not content_type.startswith("image/"):
+                # guess from URL path
+                path = urlparse(url).path
+                guessed, _ = mimetypes.guess_type(path)
+                content_type = guessed or "image/png"
+            b64 = base64.b64encode(resp.content).decode()
+            return f"data:{content_type};base64,{b64}"
+    except Exception as exc:
+        logger.warning("Failed to download image %s → %s: %s", url, internal_url, exc)
+        return None
 
 
 @router.post(
@@ -384,8 +421,8 @@ async def analyze_from_db(
             if addr_id:
                 address_query = await bc.resolve_address_query(addr_id)
 
-            # Collect presigned image URLs from attachments
-            image_urls = []
+            # Collect presigned image URLs from attachments and convert to base64
+            raw_image_urls = []
             for att in (ticket_data.get("attachments") or []):
                 att_url = att.get("url")
                 att_type = (att.get("type", {}) or {}).get("name", "") if isinstance(att.get("type"), dict) else ""
@@ -394,7 +431,21 @@ async def analyze_from_db(
                     att_key.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")
                 )
                 if att_url and is_image:
-                    image_urls.append(att_url)
+                    raw_image_urls.append(att_url)
+
+            # Download images from MinIO and convert to base64 data URIs
+            # (presigned URLs use localhost:9000 which is unreachable from
+            #  both this container and from OpenAI's servers)
+            image_urls = []
+            if raw_image_urls:
+                data_uris = await asyncio.gather(
+                    *[_download_image_as_data_uri(u) for u in raw_image_urls]
+                )
+                image_urls = [uri for uri in data_uris if uri is not None]
+                logger.info(
+                    "ticket %s: %d/%d images converted to base64",
+                    tid, len(image_urls), len(raw_image_urls),
+                )
 
             async with semaphore:
                 try:

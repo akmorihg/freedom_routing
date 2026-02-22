@@ -380,7 +380,7 @@ export const listTicketsWithAttachments = (params = {}) =>
   })}`);
 
 export const addAttachmentsToTicket = (ticketId, attachmentIds) =>
-  request(`/tickets/${ticketId}/attachments`, {
-    method: "POST",
+  request(`/tickets/${ticketId}`, {
+    method: "PUT",
     body: { attachment_ids: attachmentIds },
   });

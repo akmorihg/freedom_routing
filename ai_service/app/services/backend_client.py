@@ -372,6 +372,46 @@ class BackendClient:
             raise
 
     # ══════════════════════════════════════════════════════════════════
+    # ATTACHMENTS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def list_attachment_types(self) -> list[dict]:
+        items = await self._get("/tickets/attachment-types")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    async def create_attachment_type(self, name: str) -> dict:
+        return await self._post("/tickets/attachment-types", {"name": name})
+
+    async def find_or_create_attachment_type(self, name: str, *, _cache: dict | None = None) -> int:
+        """Return the id of an attachment type, creating if needed."""
+        if _cache is not None and name in _cache:
+            return _cache[name]
+        types = await self.list_attachment_types()
+        for t in types:
+            if (t.get("name") or "").lower() == name.lower():
+                if _cache is not None:
+                    _cache[name] = t["id_"]
+                return t["id_"]
+        created = await self.create_attachment_type(name)
+        if _cache is not None:
+            _cache[name] = created["id_"]
+        return created["id_"]
+
+    async def create_attachment(self, type_id: int, key: str) -> dict:
+        return await self._post(
+            "/tickets/attachments",
+            {"type_id": type_id, "key": key},
+        )
+
+    async def link_attachments_to_ticket(self, ticket_id: str, attachment_ids: list[int]) -> dict:
+        return await self._put(
+            f"/tickets/{ticket_id}",
+            {"attachment_ids": attachment_ids},
+        )
+
+    # ══════════════════════════════════════════════════════════════════
     # SEGMENTS
     # ══════════════════════════════════════════════════════════════════
 

@@ -1,5 +1,7 @@
 import {
   createAddress,
+  createAttachment,
+  createAttachmentType,
   createCity,
   createClientSegment,
   createCountry,
@@ -10,7 +12,9 @@ import {
   createRegion,
   createSkill,
   createTicket,
+  addAttachmentsToTicket,
   listAddresses,
+  listAttachmentTypes,
   listCities,
   listClientSegments,
   listCountries,
@@ -21,6 +25,7 @@ import {
   listRegions,
   listSkills,
   listTickets,
+  uploadFileToS3,
 } from "./backendCrud";
 
 const normalize = (value) => String(value ?? "").trim().toLowerCase();
@@ -310,6 +315,20 @@ export const syncTicketsFromCsv = async (rows = []) => {
     listClientSegments(),
   ]);
 
+  // Pre-load attachment types for image linking
+  let attachmentTypes = [];
+  try {
+    attachmentTypes = await listAttachmentTypes();
+  } catch (_e) { /* ignore if endpoint unavailable */ }
+
+  const ensureAttachmentType = async (mimeType) => {
+    const found = attachmentTypes.find((t) => normalize(t.name) === normalize(mimeType));
+    if (found) return found.id_;
+    const created = await createAttachmentType({ name: mimeType });
+    attachmentTypes.push(created);
+    return created.id_;
+  };
+
   const locationCache = await createLocationCache();
   const ticketIdSet = new Set(existingTickets.map((ticket) => String(ticket.id_).toLowerCase()));
   const cache = { genders, segments };
@@ -340,12 +359,56 @@ export const syncTicketsFromCsv = async (rows = []) => {
 
       if (validUuid) payload.id_ = validUuid;
 
-      await createTicket(payload, {
+      const createdTicket = await createTicket(payload, {
         expand: true,
         include_attachments: true,
         include_attachment_type: true,
         include_attachment_url: false,
       });
+
+      // Handle attachments from CSV (Вложения column)
+      const rawAttachments = row.attachments || row.attachment || "";
+      const attachmentNames = rawAttachments
+        ? (rawAttachments.includes(";") ? rawAttachments.split(";") : rawAttachments.split(","))
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+
+      if (attachmentNames.length > 0) {
+        const ticketKey = createdTicket.id_ || validUuid || "unknown";
+        const attachmentIds = [];
+
+        for (const fileName of attachmentNames) {
+          try {
+            // Determine MIME type from extension
+            const ext = fileName.split(".").pop()?.toLowerCase() || "";
+            const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf" };
+            const mimeType = mimeMap[ext] || "application/octet-stream";
+
+            // Ensure attachment type exists
+            const typeId = await ensureAttachmentType(mimeType);
+
+            // S3 key: tickets/<ticket_id>/<filename>
+            const s3Key = `tickets/${ticketKey}/${fileName}`;
+
+            // Create attachment record in DB (file upload happens separately via UI)
+            const att = await createAttachment({ type_id: typeId, key: s3Key });
+            attachmentIds.push(att.id_);
+          } catch (attErr) {
+            // Non-fatal: log and continue
+            summary.errors.push(`Attachment '${fileName}' for ticket ${ticketKey}: ${attErr.message}`);
+          }
+        }
+
+        // Link attachments to the ticket
+        if (attachmentIds.length > 0) {
+          try {
+            await addAttachmentsToTicket(ticketKey, attachmentIds);
+          } catch (linkErr) {
+            summary.errors.push(`Linking attachments to ticket ${ticketKey}: ${linkErr.message}`);
+          }
+        }
+      }
 
       if (validUuid) ticketIdSet.add(validUuid);
       summary.created += 1;

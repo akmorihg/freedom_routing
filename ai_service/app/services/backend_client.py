@@ -306,6 +306,21 @@ class BackendClient:
             items = items["items"]
         return items
 
+    async def get_tickets_with_attachments(self) -> list[dict]:
+        """Fetch all tickets with expanded attachments and presigned URLs."""
+        items = await self._get(
+            "/tickets/",
+            params={
+                "expand": "true",
+                "include_attachments": "true",
+                "include_attachment_type": "true",
+                "include_attachment_url": "true",
+            },
+        )
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
     async def get_ticket(self, ticket_id: str) -> dict:
         return await self._get(f"/tickets/{ticket_id}")
 

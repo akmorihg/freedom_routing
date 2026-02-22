@@ -339,8 +339,8 @@ async def analyze_from_db(
 
     bc = BackendClient(base_url=settings.backend_url)
     try:
-        # 1. Fetch all tickets from DB
-        all_tickets = await bc.get_tickets()
+        # 1. Fetch all tickets from DB (with attachment URLs for image analysis)
+        all_tickets = await bc.get_tickets_with_attachments()
         logger.info("Fetched %d tickets from DB", len(all_tickets))
 
         # 2. Fetch existing analyses to skip already-analyzed tickets
@@ -384,13 +384,25 @@ async def analyze_from_db(
             if addr_id:
                 address_query = await bc.resolve_address_query(addr_id)
 
+            # Collect presigned image URLs from attachments
+            image_urls = []
+            for att in (ticket_data.get("attachments") or []):
+                att_url = att.get("url")
+                att_type = (att.get("type", {}) or {}).get("name", "") if isinstance(att.get("type"), dict) else ""
+                att_key = att.get("key", "")
+                is_image = "image" in att_type.lower() or any(
+                    att_key.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")
+                )
+                if att_url and is_image:
+                    image_urls.append(att_url)
+
             async with semaphore:
                 try:
                     resp = await orchestrator.analyze(
                         ticket_id=tid,
                         description=description,
                         segment="Mass",
-                        attachments=None,
+                        attachments=image_urls or None,
                         address_query=address_query,
                     )
                     return tid, resp, None

@@ -301,3 +301,86 @@ const aiRequest = async (path, method = "POST") => {
 
 export const triggerAnalyzeFromDb = () => aiRequest("/ai/analyze-from-db");
 export const triggerRoutingFromDb = () => aiRequest("/routing/assign-from-db");
+
+// ── Static Files (MinIO / S3) ──────────────────────────────────────────
+
+/**
+ * Upload a file to MinIO via the backend static files endpoint.
+ * @param {File|Blob} file - the file to upload
+ * @param {string} key - S3 object key (e.g. "tickets/order_error.png")
+ * @param {string} [bucket="static"] - bucket name
+ * @returns {{ bucket, key, etag, url }}
+ */
+export const uploadFileToS3 = async (file, key, bucket = "static") => {
+  const base = activeBackendBaseUrl || BACKEND_API_URL;
+  const formData = new FormData();
+  formData.append("file", file);
+  const qs = buildQuery({ bucket, key });
+  const response = await fetchWithTimeout(`${base}/static/files${qs}`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`S3 upload failed (${response.status}): ${text}`);
+  }
+  return response.json();
+};
+
+/**
+ * Get a presigned URL for an S3 object.
+ */
+export const getPresignedUrl = (key, bucket = "static") =>
+  request(`/static/files${buildQuery({ bucket, key })}`);
+
+// ── Attachment Types ────────────────────────────────────────────────────
+
+export const listAttachmentTypes = () => request("/tickets/attachment-types");
+export const createAttachmentType = (payload) =>
+  request("/tickets/attachment-types", { method: "POST", body: payload });
+
+// ── Attachments ─────────────────────────────────────────────────────────
+
+export const listAttachments = (params = {}) =>
+  request(`/tickets/attachments${buildQuery({
+    expand_type: true,
+    include_url: true,
+    attachment_bucket: "static",
+    ...params,
+  })}`);
+
+export const createAttachment = (payload, params = {}) =>
+  request(
+    `/tickets/attachments${buildQuery({
+      expand_type: true,
+      include_url: true,
+      attachment_bucket: "static",
+      ...params,
+    })}`,
+    { method: "POST", body: payload },
+  );
+
+export const getAttachment = (id, params = {}) =>
+  request(`/tickets/attachments/${id}${buildQuery({
+    expand_type: true,
+    include_url: true,
+    attachment_bucket: "static",
+    ...params,
+  })}`);
+
+// ── Tickets with attachments ────────────────────────────────────────────
+
+export const listTicketsWithAttachments = (params = {}) =>
+  request(`/tickets${buildQuery({
+    expand: true,
+    include_attachments: true,
+    include_attachment_type: true,
+    include_attachment_url: true,
+    ...params,
+  })}`);
+
+export const addAttachmentsToTicket = (ticketId, attachmentIds) =>
+  request(`/tickets/${ticketId}/attachments`, {
+    method: "POST",
+    body: { attachment_ids: attachmentIds },
+  });

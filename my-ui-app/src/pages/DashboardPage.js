@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Alert,
   Box,
@@ -6,9 +6,13 @@ import {
   Button,
   Card,
   CardContent,
+  CardMedia,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogContent,
   Divider,
+  IconButton,
   LinearProgress,
   Table,
   TableBody,
@@ -16,12 +20,20 @@ import {
   TableHead,
   TableRow,
 } from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
 import {
   listManagers,
   listOffices,
   listTickets,
   listTicketAssignments,
   listTicketAnalyses,
+  listTicketsWithAttachments,
+  listAttachments,
+  uploadFileToS3,
+  createAttachment,
+  createAttachmentType,
+  listAttachmentTypes,
+  addAttachmentsToTicket,
   triggerAnalyzeFromDb,
   triggerRoutingFromDb,
 } from "../api/backendCrud";
@@ -77,6 +89,13 @@ const DashboardPage = ({ onBack }) => {
   const [actionStatus, setActionStatus] = useState(""); // "", "analyzing", "routing", "done"
   const [actionError, setActionError] = useState("");
   const [loadMode, setLoadMode] = useState("before");
+  const [attachmentsList, setAttachmentsList] = useState([]);
+  const [ticketsWithAttachments, setTicketsWithAttachments] = useState([]);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [lightboxUrl, setLightboxUrl] = useState(null);
+  const fileInputRef = useRef(null);
+  const [uploadTargetTicketId, setUploadTargetTicketId] = useState(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -94,6 +113,16 @@ const DashboardPage = ({ onBack }) => {
         listTicketAssignments(),
         listTicketAnalyses(),
       ]);
+
+    // Fetch attachments (non-blocking)
+    let attachResult = [];
+    let ticketsAttResult = [];
+    try {
+      [attachResult, ticketsAttResult] = await Promise.all([
+        listAttachments(),
+        listTicketsWithAttachments(),
+      ]);
+    } catch (_e) { /* ignore if attachment endpoints fail */ }
 
     const errors = [];
 
@@ -129,6 +158,9 @@ const DashboardPage = ({ onBack }) => {
     } else {
       setAnalyses([]);
     }
+
+    setAttachmentsList(Array.isArray(attachResult) ? attachResult : []);
+    setTicketsWithAttachments(Array.isArray(ticketsAttResult) ? ticketsAttResult : []);
 
     if (errors.length) {
       setBackendError(errors.join(" | "));
@@ -168,6 +200,59 @@ const DashboardPage = ({ onBack }) => {
     } catch (err) {
       setActionError(`Routing failed: ${err.message}`);
       setActionStatus("");
+    }
+  };
+
+  // ── Image upload handler ───────────────────────────────────────────
+  const handleImageUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+
+    setUploadingImage(true);
+    setUploadError("");
+
+    try {
+      // Ensure image/* attachment type exists
+      let attTypes = [];
+      try { attTypes = await listAttachmentTypes(); } catch (_) {}
+
+      const ensureType = async (mime) => {
+        const found = attTypes.find((t) => t.name?.toLowerCase() === mime.toLowerCase());
+        if (found) return found.id_;
+        const created = await createAttachmentType({ name: mime });
+        attTypes.push(created);
+        return created.id_;
+      };
+
+      for (const file of files) {
+        const mime = file.type || "application/octet-stream";
+        const typeId = await ensureType(mime);
+
+        // Choose S3 key based on target ticket
+        const prefix = uploadTargetTicketId ? `tickets/${uploadTargetTicketId}` : "uploads";
+        const s3Key = `${prefix}/${file.name}`;
+
+        // Upload to MinIO via backend
+        await uploadFileToS3(file, s3Key, "static");
+
+        // Create DB attachment record
+        const att = await createAttachment({ type_id: typeId, key: s3Key });
+
+        // Link to ticket if a target was specified
+        if (uploadTargetTicketId && att.id_) {
+          try {
+            await addAttachmentsToTicket(uploadTargetTicketId, [att.id_]);
+          } catch (_) { /* non-fatal */ }
+        }
+      }
+
+      await fetchData();
+    } catch (err) {
+      setUploadError(`Image upload failed: ${err.message}`);
+    } finally {
+      setUploadingImage(false);
+      setUploadTargetTicketId(null);
     }
   };
 
@@ -809,6 +894,234 @@ const DashboardPage = ({ onBack }) => {
             </>
           )}
 
+          {view === "attachments" && (
+            <>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 2, flexWrap: "wrap" }}>
+                <Typography variant="h4" sx={{ fontWeight: 800, color: "#0f172a" }}>
+                  Ticket Attachments
+                </Typography>
+                <Button
+                  variant="contained"
+                  size="small"
+                  disabled={uploadingImage}
+                  onClick={() => {
+                    setUploadTargetTicketId(null);
+                    fileInputRef.current?.click();
+                  }}
+                  sx={{
+                    borderRadius: 2,
+                    fontWeight: 700,
+                    textTransform: "none",
+                    background: "linear-gradient(120deg, #0ea5e9 0%, #2563eb 100%)",
+                    "&:hover": { background: "linear-gradient(120deg, #0284c7 0%, #1d4ed8 100%)" },
+                  }}
+                >
+                  {uploadingImage ? "Uploading..." : "Upload Image"}
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={handleImageUpload}
+                />
+              </Box>
+
+              {!!uploadError && (
+                <Alert severity="error" sx={{ mb: 2 }} onClose={() => setUploadError("")}>
+                  {uploadError}
+                </Alert>
+              )}
+
+              {(() => {
+                // Build a map of ticket_id → ticket info + its attachments
+                const ticketAttachmentMap = {};
+                ticketsWithAttachments.forEach((t) => {
+                  const tid = t.id_ || t.id;
+                  if (t.attachments && t.attachments.length > 0) {
+                    ticketAttachmentMap[tid] = {
+                      ticketId: tid,
+                      description: (t.description || "").slice(0, 100),
+                      segment: t.segment?.name || "-",
+                      attachments: t.attachments,
+                    };
+                  }
+                });
+
+                // Also include standalone attachments not linked to tickets
+                const linkedKeys = new Set();
+                Object.values(ticketAttachmentMap).forEach((t) =>
+                  t.attachments.forEach((a) => linkedKeys.add(a.key))
+                );
+                const standaloneAttachments = attachmentsList.filter(
+                  (a) => !linkedKeys.has(a.key)
+                );
+
+                const ticketEntries = Object.values(ticketAttachmentMap);
+                const hasAny = ticketEntries.length > 0 || standaloneAttachments.length > 0;
+
+                if (!hasAny) {
+                  return (
+                    <Alert severity="info">
+                      No attachments found. Upload images using the button above, or re-sync tickets CSV to register attachments from the Вложения column.
+                    </Alert>
+                  );
+                }
+
+                return (
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    {ticketEntries.map((entry) => (
+                      <Card
+                        key={entry.ticketId}
+                        sx={{
+                          borderRadius: 3,
+                          boxShadow: "0 6px 20px rgba(15, 23, 42, 0.10)",
+                          background: "linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(241,245,249,0.95) 100%)",
+                          border: "1px solid rgba(148, 163, 184, 0.22)",
+                        }}
+                      >
+                        <CardContent sx={{ p: 2.5 }}>
+                          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 1.5, flexWrap: "wrap" }}>
+                            <Chip
+                              label={`Ticket #${entry.ticketId}`}
+                              size="small"
+                              sx={{ bgcolor: "#1e293b", color: "#fff", fontWeight: 700, "& .MuiChip-label": { color: "#fff" } }}
+                            />
+                            <Chip label={entry.segment} size="small" variant="outlined" sx={{ fontWeight: 600, borderColor: "#6ee7b7", color: "#059669" }} />
+                            <Typography variant="body2" sx={{ color: "#64748b", fontStyle: "italic" }}>
+                              {entry.description}...
+                            </Typography>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              disabled={uploadingImage}
+                              onClick={() => {
+                                setUploadTargetTicketId(entry.ticketId);
+                                fileInputRef.current?.click();
+                              }}
+                              sx={{ ml: "auto", borderRadius: 2, textTransform: "none", fontWeight: 600, fontSize: "0.75rem" }}
+                            >
+                              + Add Image
+                            </Button>
+                          </Box>
+                          <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                            {entry.attachments.map((att) => {
+                              const isImage = (att.type?.name || att.key || "").match(/image|\.png|\.jpg|\.jpeg|\.gif|\.webp/i);
+                              const url = att.url;
+                              return (
+                                <Box
+                                  key={att.id_ || att.key}
+                                  sx={{
+                                    width: 160,
+                                    borderRadius: 2,
+                                    overflow: "hidden",
+                                    border: "1px solid rgba(148,163,184,0.3)",
+                                    background: "#f8fafc",
+                                    cursor: isImage && url ? "pointer" : "default",
+                                    transition: "box-shadow 200ms ease, transform 200ms ease",
+                                    "&:hover": { boxShadow: "0 8px 24px rgba(15,23,42,0.14)", transform: "translateY(-2px)" },
+                                  }}
+                                  onClick={() => isImage && url && setLightboxUrl(url)}
+                                >
+                                  {isImage && url ? (
+                                    <CardMedia
+                                      component="img"
+                                      image={url}
+                                      alt={att.key}
+                                      sx={{ height: 120, objectFit: "cover" }}
+                                      onError={(e) => { e.target.style.display = "none"; }}
+                                    />
+                                  ) : (
+                                    <Box sx={{ height: 120, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#e2e8f0" }}>
+                                      <Typography variant="caption" sx={{ color: "#64748b", textAlign: "center", px: 1 }}>
+                                        {att.type?.name || "File"}
+                                      </Typography>
+                                    </Box>
+                                  )}
+                                  <Box sx={{ p: 1 }}>
+                                    <Typography variant="caption" sx={{ color: "#475569", fontSize: "0.7rem", wordBreak: "break-all", display: "block", lineHeight: 1.3 }}>
+                                      {(att.key || "").split("/").pop()}
+                                    </Typography>
+                                    {att.type?.name && (
+                                      <Typography variant="caption" sx={{ color: "#94a3b8", fontSize: "0.65rem" }}>
+                                        {att.type.name}
+                                      </Typography>
+                                    )}
+                                  </Box>
+                                </Box>
+                              );
+                            })}
+                          </Box>
+                        </CardContent>
+                      </Card>
+                    ))}
+
+                    {standaloneAttachments.length > 0 && (
+                      <Card sx={{ borderRadius: 3, boxShadow: "0 6px 20px rgba(15,23,42,0.10)", background: "rgba(255,255,255,0.97)", border: "1px solid rgba(148,163,184,0.22)" }}>
+                        <CardContent sx={{ p: 2.5 }}>
+                          <Typography variant="h6" sx={{ fontWeight: 700, color: "#334155", mb: 1.5 }}>
+                            Unlinked Attachments
+                          </Typography>
+                          <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                            {standaloneAttachments.map((att) => {
+                              const isImage = (att.type?.name || att.key || "").match(/image|\.png|\.jpg|\.jpeg|\.gif|\.webp/i);
+                              const url = att.url;
+                              return (
+                                <Box
+                                  key={att.id_ || att.key}
+                                  sx={{
+                                    width: 140,
+                                    borderRadius: 2,
+                                    overflow: "hidden",
+                                    border: "1px solid rgba(148,163,184,0.3)",
+                                    background: "#f8fafc",
+                                    cursor: isImage && url ? "pointer" : "default",
+                                    "&:hover": { boxShadow: "0 6px 18px rgba(15,23,42,0.12)", transform: "translateY(-1px)" },
+                                    transition: "box-shadow 200ms ease, transform 200ms ease",
+                                  }}
+                                  onClick={() => isImage && url && setLightboxUrl(url)}
+                                >
+                                  {isImage && url ? (
+                                    <CardMedia component="img" image={url} alt={att.key} sx={{ height: 100, objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
+                                  ) : (
+                                    <Box sx={{ height: 100, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#e2e8f0" }}>
+                                      <Typography variant="caption" sx={{ color: "#64748b" }}>{att.type?.name || "File"}</Typography>
+                                    </Box>
+                                  )}
+                                  <Box sx={{ p: 0.8 }}>
+                                    <Typography variant="caption" sx={{ color: "#475569", fontSize: "0.68rem", wordBreak: "break-all", display: "block" }}>
+                                      {(att.key || "").split("/").pop()}
+                                    </Typography>
+                                  </Box>
+                                </Box>
+                              );
+                            })}
+                          </Box>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </Box>
+                );
+              })()}
+
+              {/* Image lightbox dialog */}
+              <Dialog open={!!lightboxUrl} onClose={() => setLightboxUrl(null)} maxWidth="lg">
+                <DialogContent sx={{ p: 0, position: "relative", bgcolor: "#000" }}>
+                  <IconButton
+                    onClick={() => setLightboxUrl(null)}
+                    sx={{ position: "absolute", top: 8, right: 8, color: "#fff", bgcolor: "rgba(0,0,0,0.5)", "&:hover": { bgcolor: "rgba(0,0,0,0.7)" } }}
+                  >
+                    <CloseIcon />
+                  </IconButton>
+                  {lightboxUrl && (
+                    <img src={lightboxUrl} alt="Attachment" style={{ maxWidth: "90vw", maxHeight: "85vh", display: "block" }} />
+                  )}
+                </DialogContent>
+              </Dialog>
+            </>
+          )}
+
           {view === "assignments" && (
             <>
               <Typography variant="h4" gutterBottom sx={{ fontWeight: 800, color: "#0f172a" }}>
@@ -919,6 +1232,15 @@ const DashboardPage = ({ onBack }) => {
             onClick={() => setView("summaries")}
           >
             AI Summaries
+          </Button>
+
+          <Button
+            fullWidth
+            sx={sidebarButtonSx(view === "attachments")}
+            variant={view === "attachments" ? "contained" : "outlined"}
+            onClick={() => setView("attachments")}
+          >
+            Attachments
           </Button>
 
           <Button

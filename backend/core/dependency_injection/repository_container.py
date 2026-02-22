@@ -10,8 +10,11 @@ from backend.application.repos.abstract.manager.skill import AbstractSkillReposi
 from backend.application.repos.abstract.static_files import AbstractStaticFileRepository
 from backend.application.repos.abstract.ticket.attachment import AbstractAttachmentRepository
 from backend.application.repos.abstract.ticket.attachment_type import AbstractAttachmentTypeRepository
+from backend.application.repos.abstract.ticket.analysis_meta import AbstractAnalysisMetaRepository
 from backend.application.repos.abstract.ticket.client_segment import AbstractClientSegmentRepository
 from backend.application.repos.abstract.ticket.gender import AbstractGenderRepository
+from backend.application.repos.abstract.ticket.retries_used import AbstractRetriesUsedRepository
+from backend.application.repos.abstract.ticket.task_latencies import AbstractTaskLatenciesRepository
 from backend.application.repos.abstract.ticket.ticket import AbstractTicketRepository
 from backend.application.repos.abstract.ticket.ticket_analysis import AbstractTicketAnalysisRepository
 from backend.application.repos.abstract.ticket.ticket_attachment import AbstractTicketAttachmentRepository
@@ -28,8 +31,11 @@ from backend.application.repos.sqlalchemy.manager.skill import SqlAlchemySkillRe
 from backend.application.repos.sqlalchemy.static_files import MiniIORepository
 from backend.application.repos.sqlalchemy.ticket.attachment import SqlAlchemyAttachmentRepository
 from backend.application.repos.sqlalchemy.ticket.attachment_type import SqlAlchemyAttachmentTypeRepository
+from backend.application.repos.sqlalchemy.ticket.analysis_meta import SqlAlchemyAnalysisMetaRepository
 from backend.application.repos.sqlalchemy.ticket.client_segment import SqlAlchemyClientSegmentRepository
 from backend.application.repos.sqlalchemy.ticket.gender import SqlAlchemyGenderRepository
+from backend.application.repos.sqlalchemy.ticket.retries_used import SqlAlchemyRetriesUsedRepository
+from backend.application.repos.sqlalchemy.ticket.task_latencies import SqlAlchemyTaskLatenciesRepository
 from backend.application.repos.sqlalchemy.ticket.ticket import SqlAlchemyTicketRepository
 from backend.application.repos.sqlalchemy.ticket.ticket_analysis import SqlAlchemyTicketAnalysisRepository
 from backend.application.repos.sqlalchemy.ticket.ticket_attachment import SqlAlchemyTicketAttachmentRepository
@@ -180,6 +186,33 @@ class RepositoryContainer:
     @property
     def ticket_analysis_repo_(self) -> AbstractTicketAnalysisRepository:
         return SqlAlchemyTicketAnalysisRepository(
+            session=self._internal_session(),
+            is_transactional=self.is_transactional,
+            use_cache=True,
+            cache_manager=self.global_vars_map["cache_manager"],
+        )
+
+    @property
+    def task_latencies_repo_(self) -> AbstractTaskLatenciesRepository:
+        return SqlAlchemyTaskLatenciesRepository(
+            session=self._internal_session(),
+            is_transactional=self.is_transactional,
+            use_cache=True,
+            cache_manager=self.global_vars_map["cache_manager"],
+        )
+
+    @property
+    def retries_used_repo_(self) -> AbstractRetriesUsedRepository:
+        return SqlAlchemyRetriesUsedRepository(
+            session=self._internal_session(),
+            is_transactional=self.is_transactional,
+            use_cache=True,
+            cache_manager=self.global_vars_map["cache_manager"],
+        )
+
+    @property
+    def analysis_meta_repo_(self) -> AbstractAnalysisMetaRepository:
+        return SqlAlchemyAnalysisMetaRepository(
             session=self._internal_session(),
             is_transactional=self.is_transactional,
             use_cache=True,

@@ -51,7 +51,7 @@ class Settings:
 
     # ── Batch processing ─────────────────────────────────────────────────
     batch_max_concurrency: int = field(
-        default_factory=lambda: int(os.getenv("BATCH_MAX_CONCURRENCY", "10"))
+        default_factory=lambda: int(os.getenv("BATCH_MAX_CONCURRENCY", "150"))
     )
 
     # ── Backend API (DB service) ─────────────────────────────────────────

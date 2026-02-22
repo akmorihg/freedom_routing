@@ -372,6 +372,40 @@ class BackendClient:
             raise
 
     # ══════════════════════════════════════════════════════════════════
+    # ANALYSIS META (Task Latencies, Retries Used, Analysis Meta)
+    # ══════════════════════════════════════════════════════════════════
+
+    async def create_task_latencies(self, latencies: dict) -> dict:
+        return await self._post("/tickets/task-latencies", latencies)
+
+    async def create_retries_used(self, retries: dict) -> dict:
+        return await self._post("/tickets/retries-used", retries)
+
+    async def create_analysis_meta(
+        self,
+        ticket_id: str,
+        model: str,
+        task_latencies_id: int,
+        retries_used_id: int,
+        fallbacks_used: list[str],
+        total_processing_ms: float,
+    ) -> dict:
+        return await self._post("/tickets/analysis-meta", {
+            "ticket_id": ticket_id,
+            "model": model,
+            "task_latencies_id": task_latencies_id,
+            "retries_used_id": retries_used_id,
+            "fallbacks_used": fallbacks_used,
+            "total_processing_ms": total_processing_ms,
+        })
+
+    async def get_analysis_meta_list(self, expand: bool = True) -> list[dict]:
+        items = await self._get(f"/tickets/analysis-meta?expand={str(expand).lower()}")
+        if isinstance(items, dict) and "items" in items:
+            items = items["items"]
+        return items
+
+    # ══════════════════════════════════════════════════════════════════
     # ATTACHMENTS
     # ══════════════════════════════════════════════════════════════════
 

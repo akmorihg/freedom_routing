@@ -273,6 +273,12 @@ export const listTicketAssignments = () => request("/tickets/assignments");
 // Ticket Analysis (separate from tickets)
 export const listTicketAnalyses = () => request("/tickets/analysis");
 
+// Analysis Meta (latencies, retries, fallbacks)
+export const listAnalysisMeta = (expand = true) =>
+  request(`/tickets/analysis-meta${buildQuery({ expand })}`);
+export const listTaskLatencies = () => request("/tickets/task-latencies");
+export const listRetriesUsed = () => request("/tickets/retries-used");
+
 // AI Service helpers (called via /ai proxy)
 const AI_BASE = process.env.REACT_APP_AI_API_URL || "/ai";
 

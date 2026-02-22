@@ -362,7 +362,7 @@ async def upload_csv(
     ),
 )
 async def analyze_from_db(
-    concurrency: int = Query(default=5, ge=1, le=20, description="Max parallel analyses"),
+    concurrency: int = Query(default=5, ge=1, le=150, description="Max parallel analyses"),
     limit: int = Query(default=0, ge=0, description="Max tickets to process (0 = all)"),
 ) -> JSONResponse:
     """Pull tickets from DB → run LLM → store analysis results to DB."""
@@ -492,6 +492,21 @@ async def analyze_from_db(
                     formatted_address=a.geo.formatted_address,
                 )
                 stored += 1
+                # Store analysis meta (latencies, retries, fallbacks)
+                try:
+                    m = resp.meta
+                    lat_rec = await bc.create_task_latencies(m.task_latencies_ms.model_dump())
+                    ret_rec = await bc.create_retries_used(m.retries_used.model_dump())
+                    await bc.create_analysis_meta(
+                        ticket_id=resp.ticket_id,
+                        model=m.model,
+                        task_latencies_id=lat_rec["id_"],
+                        retries_used_id=ret_rec["id_"],
+                        fallbacks_used=m.fallbacks_used,
+                        total_processing_ms=m.total_processing_ms,
+                    )
+                except Exception as meta_err:
+                    logger.warning("Failed to store meta for %s: %s", tid, meta_err)
                 # Also save to local JSON
                 await save_result(resp.model_dump())
             except Exception as e:

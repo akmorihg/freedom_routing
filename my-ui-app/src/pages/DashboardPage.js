@@ -30,6 +30,7 @@ import {
   listTickets,
   listTicketAssignments,
   listTicketAnalyses,
+  listAnalysisMeta,
   listTicketsWithAttachments,
   listAttachments,
   uploadFileToS3,
@@ -83,6 +84,7 @@ const DashboardPage = ({ onBack }) => {
   const [managers, setManagers] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [analyses, setAnalyses] = useState([]);
+  const [analysisMeta, setAnalysisMeta] = useState([]);
   const [businessUnits, setBusinessUnits] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [view, setView] = useState("load");
@@ -122,12 +124,14 @@ const DashboardPage = ({ onBack }) => {
     // Fetch attachments (non-blocking)
     let attachResult = [];
     let ticketsAttResult = [];
+    let metaResult = [];
     try {
-      [attachResult, ticketsAttResult] = await Promise.all([
+      [attachResult, ticketsAttResult, metaResult] = await Promise.all([
         listAttachments(),
         listTicketsWithAttachments(),
+        listAnalysisMeta(true),
       ]);
-    } catch (_e) { /* ignore if attachment endpoints fail */ }
+    } catch (_e) { /* ignore if endpoints fail */ }
 
     const errors = [];
 
@@ -166,6 +170,7 @@ const DashboardPage = ({ onBack }) => {
 
     setAttachmentsList(Array.isArray(attachResult) ? attachResult : []);
     setTicketsWithAttachments(Array.isArray(ticketsAttResult) ? ticketsAttResult : []);
+    setAnalysisMeta(Array.isArray(metaResult) ? metaResult : []);
 
     if (errors.length) {
       setBackendError(errors.join(" | "));
@@ -883,6 +888,214 @@ const DashboardPage = ({ onBack }) => {
               <Typography variant="h4" gutterBottom sx={{ fontWeight: 800, color: "#0f172a" }}>
                 AI Summaries & Recommendations
               </Typography>
+
+              {/* ── Analysis Metrics Dashboard ── */}
+              {analysisMeta.length > 0 && (() => {
+                // Build meta lookup by ticket_id
+                const metaMap = {};
+                analysisMeta.forEach((m) => { metaMap[m.ticket_id] = m; });
+
+                // Aggregate stats
+                const totalAnalyzed = analysisMeta.length;
+                const avgProcessingMs = analysisMeta.reduce((s, m) => s + (m.total_processing_ms || 0), 0) / totalAnalyzed;
+                const models = [...new Set(analysisMeta.map((m) => m.model))];
+
+                // Task latency averages
+                const taskNames = ["request_type", "sentiment", "urgency_score", "language", "summary", "geo", "image_describe"];
+                const taskLabels = { request_type: "Request Type", sentiment: "Sentiment", urgency_score: "Urgency", language: "Language", summary: "Summary", geo: "Geo", image_describe: "Image Describe" };
+                const avgLatencies = {};
+                const avgRetries = {};
+                taskNames.forEach((t) => {
+                  const lats = analysisMeta.map((m) => m.task_latencies?.[t] ?? 0);
+                  avgLatencies[t] = lats.reduce((a, b) => a + b, 0) / totalAnalyzed;
+                  const rets = analysisMeta.map((m) => m.retries_used?.[t] ?? 0);
+                  avgRetries[t] = rets.reduce((a, b) => a + b, 0) / totalAnalyzed;
+                });
+
+                // Fallback frequency
+                const fallbackCounts = {};
+                analysisMeta.forEach((m) => {
+                  (m.fallbacks_used || []).forEach((f) => {
+                    fallbackCounts[f] = (fallbackCounts[f] || 0) + 1;
+                  });
+                });
+                const totalFallbacks = Object.values(fallbackCounts).reduce((a, b) => a + b, 0);
+
+                // Max latency task per ticket
+                const maxLatencyTask = taskNames.reduce((max, t) => avgLatencies[t] > avgLatencies[max] ? t : max, taskNames[0]);
+
+                return (
+                  <Card sx={{
+                    mb: 3, borderRadius: 3,
+                    background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+                    color: "#fff",
+                    boxShadow: "0 8px 32px rgba(15, 23, 42, 0.25)",
+                  }}>
+                    <CardContent sx={{ p: 3 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 700, mb: 2, color: "#e2e8f0" }}>
+                        📊 Analysis Performance Metrics
+                      </Typography>
+
+                      {/* KPIs row */}
+                      <Box sx={{ display: "flex", gap: 2, mb: 3, flexWrap: "wrap" }}>
+                        {[
+                          { label: "Tickets Analyzed", value: totalAnalyzed, color: "#38bdf8" },
+                          { label: "Avg Processing", value: `${avgProcessingMs.toFixed(0)}ms`, color: "#a78bfa" },
+                          { label: "Model", value: models.join(", "), color: "#34d399" },
+                          { label: "Total Fallbacks", value: totalFallbacks, color: totalFallbacks > 0 ? "#f87171" : "#34d399" },
+                        ].map((kpi) => (
+                          <Box key={kpi.label} sx={{
+                            flex: "1 1 140px", minWidth: 140,
+                            bgcolor: "rgba(255,255,255,0.06)", borderRadius: 2, p: 2,
+                            border: "1px solid rgba(255,255,255,0.1)",
+                          }}>
+                            <Typography variant="caption" sx={{ color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", fontSize: "0.65rem", letterSpacing: 1 }}>
+                              {kpi.label}
+                            </Typography>
+                            <Typography variant="h5" sx={{ fontWeight: 800, color: kpi.color, mt: 0.5 }}>
+                              {kpi.value}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Box>
+
+                      {/* Task Latencies bar chart */}
+                      <Typography variant="subtitle2" sx={{ color: "#cbd5e1", fontWeight: 700, mb: 1.5 }}>
+                        Average Task Latencies (ms)
+                      </Typography>
+                      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, mb: 3 }}>
+                        {taskNames.map((t) => {
+                          const val = avgLatencies[t];
+                          const maxVal = Math.max(...Object.values(avgLatencies), 1);
+                          const pct = (val / maxVal) * 100;
+                          const barColor = t === maxLatencyTask ? "#f59e0b" : "#38bdf8";
+                          return (
+                            <Box key={t} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                              <Typography variant="caption" sx={{ color: "#94a3b8", width: 100, textAlign: "right", fontSize: "0.7rem", fontWeight: 600 }}>
+                                {taskLabels[t]}
+                              </Typography>
+                              <Box sx={{ flex: 1, height: 18, bgcolor: "rgba(255,255,255,0.06)", borderRadius: 1, overflow: "hidden", position: "relative" }}>
+                                <Box sx={{ width: `${Math.max(pct, 2)}%`, height: "100%", bgcolor: barColor, borderRadius: 1, transition: "width 0.5s ease" }} />
+                              </Box>
+                              <Typography variant="caption" sx={{ color: "#e2e8f0", width: 60, fontWeight: 700, fontSize: "0.72rem" }}>
+                                {val.toFixed(1)}ms
+                              </Typography>
+                            </Box>
+                          );
+                        })}
+                      </Box>
+
+                      {/* Retries & Fallbacks row */}
+                      <Box sx={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+                        {/* Avg retries */}
+                        <Box sx={{ flex: "1 1 280px" }}>
+                          <Typography variant="subtitle2" sx={{ color: "#cbd5e1", fontWeight: 700, mb: 1 }}>
+                            Average Retries per Task
+                          </Typography>
+                          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                            {taskNames.map((t) => (
+                              <Chip
+                                key={t}
+                                label={`${taskLabels[t]}: ${avgRetries[t].toFixed(2)}`}
+                                size="small"
+                                sx={{
+                                  bgcolor: avgRetries[t] > 0.5 ? "rgba(248,113,113,0.2)" : "rgba(52,211,153,0.15)",
+                                  color: avgRetries[t] > 0.5 ? "#fca5a5" : "#6ee7b7",
+                                  fontWeight: 600, fontSize: "0.7rem",
+                                  border: `1px solid ${avgRetries[t] > 0.5 ? "rgba(248,113,113,0.3)" : "rgba(52,211,153,0.25)"}`,
+                                }}
+                              />
+                            ))}
+                          </Box>
+                        </Box>
+
+                        {/* Fallback breakdown */}
+                        {totalFallbacks > 0 && (
+                          <Box sx={{ flex: "1 1 200px" }}>
+                            <Typography variant="subtitle2" sx={{ color: "#cbd5e1", fontWeight: 700, mb: 1 }}>
+                              Fallbacks Used
+                            </Typography>
+                            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                              {Object.entries(fallbackCounts).map(([name, count]) => (
+                                <Chip
+                                  key={name}
+                                  label={`${name}: ${count}`}
+                                  size="small"
+                                  sx={{
+                                    bgcolor: "rgba(248,113,113,0.2)", color: "#fca5a5",
+                                    fontWeight: 700, fontSize: "0.7rem",
+                                    border: "1px solid rgba(248,113,113,0.3)",
+                                  }}
+                                />
+                              ))}
+                            </Box>
+                          </Box>
+                        )}
+                      </Box>
+
+                      {/* Per-ticket detail table */}
+                      <Box sx={{ mt: 3 }}>
+                        <Typography variant="subtitle2" sx={{ color: "#cbd5e1", fontWeight: 700, mb: 1 }}>
+                          Per-Ticket Breakdown
+                        </Typography>
+                        <Box sx={{ maxHeight: 280, overflow: "auto", borderRadius: 2, border: "1px solid rgba(255,255,255,0.08)" }}>
+                          <Table size="small" sx={{ "& td, & th": { color: "#e2e8f0", borderColor: "rgba(255,255,255,0.06)", fontSize: "0.72rem", py: 0.8 } }}>
+                            <TableHead>
+                              <TableRow sx={{ bgcolor: "rgba(255,255,255,0.04)" }}>
+                                <TableCell sx={{ fontWeight: 700 }}>Ticket</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700 }}>Total (ms)</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700 }}>Slowest Task</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700 }}>Retries</TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>Fallbacks</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {analysisMeta.map((m) => {
+                                const lat = m.task_latencies || {};
+                                const ret = m.retries_used || {};
+                                // find slowest task
+                                let slowest = "-";
+                                let slowestVal = 0;
+                                taskNames.forEach((t) => {
+                                  if ((lat[t] || 0) > slowestVal) { slowestVal = lat[t]; slowest = taskLabels[t]; }
+                                });
+                                const totalRetries = taskNames.reduce((s, t) => s + (ret[t] || 0), 0);
+                                return (
+                                  <TableRow key={m.ticket_id} sx={{ "&:hover": { bgcolor: "rgba(255,255,255,0.04)" } }}>
+                                    <TableCell>
+                                      <Chip label={`#${String(m.ticket_id).slice(0, 8)}…`} size="small"
+                                        sx={{ bgcolor: "rgba(56,189,248,0.15)", color: "#7dd3fc", fontWeight: 700, fontSize: "0.68rem" }} />
+                                    </TableCell>
+                                    <TableCell align="right" sx={{ fontWeight: 700, color: (m.total_processing_ms || 0) > 10000 ? "#f87171" : "#34d399" }}>
+                                      {(m.total_processing_ms || 0).toFixed(0)}
+                                    </TableCell>
+                                    <TableCell align="right">
+                                      {slowest} ({slowestVal.toFixed(0)}ms)
+                                    </TableCell>
+                                    <TableCell align="right" sx={{ color: totalRetries > 0 ? "#fbbf24" : "#6ee7b7" }}>
+                                      {totalRetries}
+                                    </TableCell>
+                                    <TableCell>
+                                      {(m.fallbacks_used || []).length === 0
+                                        ? <Chip label="None" size="small" sx={{ bgcolor: "rgba(52,211,153,0.15)", color: "#6ee7b7", fontSize: "0.65rem" }} />
+                                        : (m.fallbacks_used || []).map((f) => (
+                                          <Chip key={f} label={f} size="small"
+                                            sx={{ bgcolor: "rgba(248,113,113,0.15)", color: "#fca5a5", fontSize: "0.65rem", mr: 0.5 }} />
+                                        ))
+                                      }
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </TableBody>
+                          </Table>
+                        </Box>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                );
+              })()}
+
               {summaryRows.length === 0 ? (
                 <Alert severity="info" sx={{ mb: 2 }}>
                   No AI summaries available yet. Click "Run AI Analysis" to generate them.

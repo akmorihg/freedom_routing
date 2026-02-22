@@ -87,7 +87,7 @@ class MiniIORepository(AbstractStaticFileRepository):
             )
             url = await maybe_url if inspect.isawaitable(maybe_url) else maybe_url
 
-            url = url.replace("minio:9000", "192.168.0.151:9000")
+            url = url.replace("minio:9000", "localhost:9000")
 
             return str(url)
 
